@@ -1,0 +1,2 @@
+# qbittorrent_auto_helper
+qbittorrent自动化做种脚本
