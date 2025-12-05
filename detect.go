@@ -437,14 +437,15 @@ const HTMLContent = `
     });
 
     // --- Loops ---
-    setInterval(fetchFileList, 5000);
+    // Update interval changed to 20000ms (20s) to reduce bandwidth
+    setInterval(fetchFileList, 20000);
     fetchFileList(); // Initial load
 
     setInterval(() => {
         if (state.currentFile) {
             fetchLogContent(state.currentFile);
         }
-    }, 1000);
+    }, 20000); // Updated to 20s
 
 </script>
 </body>
