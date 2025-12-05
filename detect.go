@@ -38,6 +38,8 @@ const HTMLContent = `
             --log-text: #cccccc;
             --tab-active-bg: #37373d;
             --tab-hover-bg: #2a2d2e;
+            --btn-bg: #3c3c3c;
+            --btn-border: #555;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -47,7 +49,6 @@ const HTMLContent = `
             background-color: var(--bg-color);
             color: var(--text-color);
             height: 100vh;
-            /* Mobile viewport height fix */
             height: 100dvh; 
             display: flex;
             flex-direction: column;
@@ -72,6 +73,7 @@ const HTMLContent = `
             flex-direction: column;
             overflow-y: auto;
             -webkit-overflow-scrolling: touch;
+            flex-shrink: 0;
         }
 
         .sidebar-header {
@@ -117,16 +119,16 @@ const HTMLContent = `
             display: flex;
             flex-direction: column;
             background-color: var(--log-bg);
-            min-width: 0; /* Fix flex child overflow */
-            overflow: hidden; /* Ensure inner scroll works */
+            min-width: 0;
+            overflow: hidden;
         }
 
         .toolbar {
-            height: 40px;
+            height: 42px;
             background-color: #333;
             display: flex;
             align-items: center;
-            padding: 0 15px;
+            padding: 0 10px;
             justify-content: space-between;
             font-size: 12px;
             border-bottom: 1px solid #444;
@@ -135,8 +137,62 @@ const HTMLContent = `
 
         .status-bar {
             display: flex;
-            gap: 15px;
+            gap: 10px;
             align-items: center;
+            overflow: hidden;
+            white-space: nowrap;
+            flex: 1;
+        }
+        
+        .file-label {
+            font-weight: bold;
+            max-width: 150px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .refresh-tag {
+            color: var(--accent-color);
+            opacity: 0;
+            transition: opacity 0.2s;
+            font-weight: bold;
+            font-size: 11px;
+        }
+
+        .refresh-tag.active {
+            opacity: 1;
+            animation: pulse 1s infinite alternate;
+        }
+
+        @keyframes pulse {
+            from { opacity: 0.3; }
+            to { opacity: 1; }
+        }
+
+        .time-tag {
+            color: #888;
+            font-family: monospace;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn {
+            background-color: var(--btn-bg);
+            border: 1px solid var(--btn-border);
+            color: #ccc;
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .btn:active {
+            background-color: #555;
         }
 
         .log-container {
@@ -149,7 +205,6 @@ const HTMLContent = `
             color: var(--log-text);
             white-space: pre-wrap;
             word-break: break-all;
-            /* Mobile Scroll Fixes */
             -webkit-overflow-scrolling: touch;
             scroll-behavior: smooth;
         }
@@ -160,16 +215,11 @@ const HTMLContent = `
             align-items: center;
             cursor: pointer;
             user-select: none;
+            color: #ccc;
         }
         
         .switch-checkbox {
-            margin-right: 5px;
-        }
-
-        .loading {
-            color: #888;
-            text-align: center;
-            margin-top: 20px;
+            margin-right: 4px;
         }
 
         .empty-state {
@@ -189,30 +239,31 @@ const HTMLContent = `
             
             .sidebar {
                 width: 100%;
-                height: auto;
-                max-height: 150px; /* Collapsible area for tabs */
+                max-height: 120px;
                 border-right: none;
                 border-bottom: 1px solid #333;
-                flex-shrink: 0;
             }
 
             .file-list {
                 display: flex;
                 flex-wrap: nowrap;
                 overflow-x: auto;
-                -webkit-overflow-scrolling: touch;
             }
 
             .file-item {
                 flex: 0 0 auto;
                 border-left: none;
                 border-bottom: 3px solid transparent;
-                padding: 12px 15px;
+                padding: 10px 15px;
             }
 
             .file-item.active {
                 border-left: none;
                 border-bottom-color: var(--accent-color);
+            }
+
+            .file-label {
+                display: none; /* Hide filename in toolbar on mobile to save space */
             }
         }
     </style>
@@ -220,32 +271,30 @@ const HTMLContent = `
 <body>
 
     <div class="container">
-        <!-- Sidebar for File List -->
         <div class="sidebar">
             <div class="sidebar-header">Log Files</div>
-            <ul class="file-list" id="fileList">
-                <!-- Log files will be injected here -->
-            </ul>
+            <ul class="file-list" id="fileList"></ul>
         </div>
 
-        <!-- Main Viewing Area -->
         <div class="main-view">
             <div class="toolbar">
                 <div class="status-bar">
-                    <span id="currentFileLabel">No file selected</span>
-                    <span id="updateStatus" style="color: #666;">Waiting...</span>
+                    <span id="currentFileLabel" class="file-label">No file</span>
+                    <span id="refreshTag" class="refresh-tag">REFRESHING</span>
+                    <span id="timeTag" class="time-tag">Updated: --:--:--</span>
                 </div>
                 <div class="controls">
+                    <button class="btn" onclick="scrollToTop()">Top</button>
+                    <button class="btn" onclick="scrollToBottom()">End</button>
                     <label class="switch-label">
                         <input type="checkbox" id="autoScrollCheck" class="switch-checkbox" checked>
-                        Auto-Scroll
+                        <span>Auto</span>
                     </label>
                 </div>
             </div>
             <div class="log-container" id="logContent">
                 <div class="empty-state">
-                    <h3>Select a log file to view</h3>
-                    <p>Files in current directory are listed automatically.</p>
+                    <h3>Scanning...</h3>
                 </div>
             </div>
         </div>
@@ -256,27 +305,35 @@ const HTMLContent = `
         currentFile: null,
         autoScroll: true,
         logs: [],
-        lastFetchHash: ""
+        firstLoad: true
     };
 
     const dom = {
         fileList: document.getElementById('fileList'),
         logContent: document.getElementById('logContent'),
         currentFileLabel: document.getElementById('currentFileLabel'),
-        status: document.getElementById('updateStatus'),
+        refreshTag: document.getElementById('refreshTag'),
+        timeTag: document.getElementById('timeTag'),
         autoScrollCheck: document.getElementById('autoScrollCheck')
     };
 
-    // --- Helpers ---
-    function formatTime() {
-        const now = new Date();
-        return now.toLocaleTimeString();
+    // --- Actions ---
+    function scrollToTop() {
+        state.autoScroll = false; // User manually scrolled, disable auto
+        dom.autoScrollCheck.checked = false;
+        dom.logContent.scrollTop = 0;
     }
 
     function scrollToBottom() {
-        if (state.autoScroll) {
-            dom.logContent.scrollTop = dom.logContent.scrollHeight;
-        }
+        dom.logContent.scrollTop = dom.logContent.scrollHeight;
+        // If user explicitly clicks End, we can probably re-enable auto-scroll
+        state.autoScroll = true;
+        dom.autoScrollCheck.checked = true;
+    }
+
+    function updateTimeDisplay() {
+        const now = new Date();
+        dom.timeTag.innerText = "Updated: " + now.toLocaleTimeString();
     }
 
     // --- API Calls ---
@@ -285,11 +342,20 @@ const HTMLContent = `
             const response = await fetch('/api/files');
             const files = await response.json();
             
-            // Basic diff check to avoid rebuilding DOM if list hasn't changed (by length for simplicity)
-            // A real app might do deep comparison, but this is sufficient.
+            // Diff check
             if (JSON.stringify(files) !== JSON.stringify(state.logs)) {
                 state.logs = files;
                 renderFileList(files);
+                
+                // Auto-select first file on initial load or if no file selected
+                if ((state.firstLoad || !state.currentFile) && files.length > 0) {
+                    selectFile(files[0]);
+                    state.firstLoad = false;
+                }
+            } else if (state.firstLoad && files.length > 0) {
+                // Should not happen often, but ensures selection if list didn't change but it's first run
+                selectFile(files[0]);
+                state.firstLoad = false;
             }
         } catch (e) {
             console.error("Failed to fetch file list", e);
@@ -299,22 +365,30 @@ const HTMLContent = `
     async function fetchLogContent(filename) {
         if (!filename) return;
         
-        dom.status.innerText = "Refreshing...";
+        // Show refreshing animation
+        dom.refreshTag.classList.add('active');
+
         try {
             const response = await fetch('/api/content?file=' + encodeURIComponent(filename));
             if (!response.ok) throw new Error("File not found");
             
             const text = await response.text();
             
-            // Only update DOM if content is different
+            // Only update DOM if content changed
             if (dom.logContent.innerText !== text) {
                 dom.logContent.innerText = text;
-                scrollToBottom();
+                if (state.autoScroll) {
+                    dom.logContent.scrollTop = dom.logContent.scrollHeight;
+                }
             }
-            dom.status.innerText = "Updated: " + formatTime();
+            updateTimeDisplay();
         } catch (e) {
-            dom.logContent.innerHTML = '<div style="color:red; padding:20px;">Error loading file. It may have been deleted.</div>';
-            dom.status.innerText = "Error";
+            dom.logContent.innerHTML = '<div style="color:red; padding:20px;">Error loading file.</div>';
+        } finally {
+            // Hide refreshing animation
+            setTimeout(() => {
+                dom.refreshTag.classList.remove('active');
+            }, 300); // Small delay to make sure the flash is visible
         }
     }
 
@@ -324,6 +398,7 @@ const HTMLContent = `
         
         if (files.length === 0) {
             dom.fileList.innerHTML = '<li style="padding:15px; color:#666;">No .log files found</li>';
+            dom.logContent.innerHTML = '<div class="empty-state"><h3>No log files found</h3></div>';
             return;
         }
 
@@ -335,16 +410,11 @@ const HTMLContent = `
             li.onclick = () => selectFile(file);
             dom.fileList.appendChild(li);
         });
-
-        // If current file is not in new list, deselect
-        if (state.currentFile && !files.includes(state.currentFile)) {
-            selectFile(null);
-        }
     }
 
     function selectFile(filename) {
         state.currentFile = filename;
-        dom.currentFileLabel.innerText = filename || "No file selected";
+        dom.currentFileLabel.innerText = filename || "No file";
         
         // Update UI active state
         Array.from(dom.fileList.children).forEach(li => {
@@ -355,23 +425,21 @@ const HTMLContent = `
         if (filename) {
             dom.logContent.innerText = "Loading...";
             fetchLogContent(filename);
-        } else {
-            dom.logContent.innerHTML = '<div class="empty-state"><h3>Select a log file to view</h3></div>';
         }
     }
 
     // --- Event Listeners ---
     dom.autoScrollCheck.addEventListener('change', (e) => {
         state.autoScroll = e.target.checked;
-        if (state.autoScroll) scrollToBottom();
+        if (state.autoScroll) {
+            dom.logContent.scrollTop = dom.logContent.scrollHeight;
+        }
     });
 
     // --- Loops ---
-    // 1. Refresh file list every 5 seconds
     setInterval(fetchFileList, 5000);
     fetchFileList(); // Initial load
 
-    // 2. Refresh content every 1 second
     setInterval(() => {
         if (state.currentFile) {
             fetchLogContent(state.currentFile);
@@ -450,7 +518,6 @@ func handleFileContent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// SECURITY: Ensure we only read files in current directory and only .log files
-	// This prevents path traversal attacks like ../../etc/passwd
 	cleanName := filepath.Base(filename)
 	if filepath.Ext(cleanName) != ".log" {
 		http.Error(w, "Only .log files are allowed", http.StatusForbidden)
@@ -464,9 +531,6 @@ func handleFileContent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read file content
-	// Note: For extremely large log files, this reads the whole file into memory.
-	// For a simple tool, this is acceptable. For production handling GBs of logs,
-	// seek/tail logic would be needed.
 	content, err := ioutil.ReadFile(cleanName)
 	if err != nil {
 		http.Error(w, "Error reading file", http.StatusInternalServerError)
