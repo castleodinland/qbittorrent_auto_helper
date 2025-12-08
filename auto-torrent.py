@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from qbittorrentapi import exceptions
+from datetime import datetime, timedelta
 
 # 尝试导入必要的库
 try:
@@ -37,8 +38,12 @@ DISK_RESERVE_GB = 2.0
 # 新增下载任务的标签
 TORRENT_TAG = 'auto-add'
 
-# 日志文件名 (已更新到 v3.9)
-LOG_FILENAME = 'auto-torrent-v3.9.log'
+# 日志文件名 (已更新到 v4.0)
+LOG_FILENAME = 'auto-torrent-v4.0.log'
+
+# --- 时区配置 ---
+# 日志时间显示时区 (小时): 默认 UTC+8 (北京时间)
+LOG_TIMEZONE_HOURS = 8 
 
 # 基础时间间隔配置 (秒)
 WAIT_DOWNLOAD_CHECK = 60       # 检查下载是否完成的间隔
@@ -55,28 +60,36 @@ UPLOAD_SPEED_THRESHOLD_KB = 200  # (KB/s) 上传速度阈值 (平均值)
 WAIT_UPLOAD_CHECK = 300          # (5分钟) 上传速度高时的等待间隔
 UPLOAD_SAMPLE_DURATION = 30      # (30秒) 速度检测的采样时长
 
-# --- v3.9 新增: 动态下载超时配置 ---
+# --- 动态下载超时配置 ---
 # 下载超时基准：每 10GB 给予 1 小时
-TIMEOUT_GB_PER_HOUR = 10 
+TIMEOUT_GB_PER_HOUR = 15 
 
 # --- Kickstart 批量配置 ---
-KICKSTART_BATCH_SIZE = 5         # 每次触发 Kickstart 时重启的任务数量
+KICKSTART_BATCH_SIZE = 5         # 每次触发 Kickstart 的基础数量 N
 
 # ==========================================
 # 全局状态
 # ==========================================
-# 存储需要进行一次性 Kickstart 的任务哈希集合 (已完成下载，等待上传)
-TORRENTS_TO_KICKSTART = set()
 
 # 跟踪当前唯一的正在下载的任务
-# 包含哈希、开始时间、任务名、以及基于容量计算出的超时秒数
 ACTIVE_DOWNLOAD_TRACKER = {'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0}
+
+# Kickstart 倍增计数器
+KICKSTART_MULTIPLIER = 1
 
 # ==========================================
 # 日志配置
 # ==========================================
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# 自定义时区转换器 (UTC+X)
+TZ_OFFSET_SECONDS = LOG_TIMEZONE_HOURS * 3600
+def time_zone_converter(timestamp):
+    dt_utc = datetime.utcfromtimestamp(timestamp)
+    dt_local = dt_utc + timedelta(seconds=TZ_OFFSET_SECONDS)
+    return dt_local.timetuple()
 
 if logger.hasHandlers():
     logger.handlers.clear()
@@ -88,14 +101,18 @@ try:
         backupCount=3, 
         encoding='utf-8'
     )
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    file_handler.setFormatter(formatter)
+    file_handler.formatter.converter = time_zone_converter 
     logger.addHandler(file_handler)
 except Exception as e:
     print(f"无法创建日志文件: {e}")
     sys.exit(1)
 
 stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+stream_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+stream_handler.setFormatter(stream_formatter)
+stream_handler.formatter.converter = time_zone_converter 
 logger.addHandler(stream_handler)
 
 
@@ -151,7 +168,6 @@ def has_unfinished_downloads(client):
 def verify_torrent_added(client, torrent_hash):
     """轮询确认种子确实已添加到列表中"""
     start_time = time.time()
-    # 只需要轮询短时间，因为 qBittorrent 添加很快
     while time.time() - start_time < 10: 
         try:
             torrents = client.torrents_info(torrent_hashes=torrent_hash)
@@ -192,8 +208,8 @@ def cleanup_files():
     
     whitelist_extensions = ['.py', '.sh', '.log']
     whitelist_dirs = ['torrent-lib', '.git', '__pycache__']
-    # 保护 v3.9 版本的脚本自身
-    whitelist_files = [LOG_FILENAME, 'auto-torrent-v3.9.py'] 
+    # 保护 v4.0 版本的脚本自身
+    whitelist_files = [LOG_FILENAME, 'auto-torrent-v4.0.py'] 
     
     lib_path_abs = Path(TORRENT_LIB_PATH).absolute()
 
@@ -234,24 +250,20 @@ def check_disk_space(required_bytes):
 
 def cleanup_slow_torrent(client, t_hash, t_name):
     """删除慢速任务及其数据，并将种子文件标记为 .slow"""
-    # 计算超时时间 (只用于日志)
     timeout_hours = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] / 3600
     logger.warning(f"下载超时 ({timeout_hours:.2f}小时): 任务 {t_name} (Hash: {t_hash[:10]}) 未完成，开始清理...")
     
-    # 1. 删除任务和数据
     try:
         client.torrents_delete(torrent_hashes=t_hash, delete_files=True)
         logger.info(f"已从 qBittorrent 删除慢速任务和数据: {t_name}")
     except Exception as e:
         logger.error(f"删除慢速任务 {t_name} 失败: {e}")
         
-    # 2. 标记种子文件为 .slow
     lib_path = Path(TORRENT_LIB_PATH)
     found = False
     for t_file in lib_path.glob('*.torrent'):
         file_hash, _ = get_torrent_info_from_file(t_file)
         if file_hash == t_hash:
-            # 使用 .torrent.slow 避免误删
             new_name = t_file.with_name(t_file.name + ".slow")
             try:
                 t_file.rename(new_name)
@@ -286,7 +298,6 @@ def process_stalled_tasks(client):
             
             if t.hash in local_torrents_map:
                 src_file = local_torrents_map[t.hash]
-                # 区别于 .slow，使用 .dead
                 new_name = src_file.with_name(src_file.name + ".dead") 
                 try:
                     src_file.rename(new_name)
@@ -312,7 +323,6 @@ def count_unadded_torrents(client):
         remote_hashes = {t.hash.lower() for t in remote_torrents}
         lib_path = Path(TORRENT_LIB_PATH)
         count = 0
-        # 排除 .slow 和 .dead 标记的文件
         for t_file in lib_path.glob('*.torrent'):
             t_hash, _ = get_torrent_info_from_file(t_file)
             if t_hash and t_hash not in remote_hashes and not t_file.name.endswith(('.slow', '.dead')):
@@ -321,25 +331,6 @@ def count_unadded_torrents(client):
     except Exception as e:
         logger.warning(f"统计剩余种子失败: {e}")
         return -1
-
-def initialize_kickstart_queue(client):
-    """脚本启动时，只将当前处于**下载状态**的任务加入 Kickstart 队列。"""
-    global TORRENTS_TO_KICKSTART
-    logger.info(f"检查启动前正在下载的任务 (Tag: {TORRENT_TAG})，将其加入 Kickstart 队列...")
-    
-    try:
-        # 查找所有带有特定标签的任务
-        torrents = client.torrents_info(tag=TORRENT_TAG)
-        
-        for t in torrents:
-             # 如果任务已完成 (progress=1.0) 且不是元数据下载，就认为是做种/暂停/排队任务，需要 Kickstart
-            if t.progress >= 1.0 and t.state != 'checkingUP':
-                TORRENTS_TO_KICKSTART.add(t.hash)
-
-        logger.info(f"Kickstart 队列初始化完成，待处理任务数 (当前已完成/做种): {len(TORRENTS_TO_KICKSTART)}")
-
-    except Exception as e:
-        logger.error(f"初始化 Kickstart 队列失败: {e}")
 
 def format_seconds_to_ddhhmm(seconds):
     """将秒数转换为 ddhhmm 格式"""
@@ -353,71 +344,53 @@ def format_seconds_to_ddhhmm(seconds):
     return f"{days:02d}d{hours:02d}h{minutes:02d}m"
 
 def check_and_update_active_download(client):
-    """(v3.9) 检查当前活动的下载任务是否已改变或完成，并动态计算超时时间"""
+    """检查当前活动的下载任务是否已改变或完成，并动态计算超时时间"""
     global ACTIVE_DOWNLOAD_TRACKER
     
     try:
-        # 1. 获取当前下载任务 (只取第一个)
-        # 查找所有正在下载 (downloading) 且带有特定标签的任务
         downloading_torrents = client.torrents_info(tag=TORRENT_TAG, filter='downloading')
         current_active_hash = downloading_torrents[0].hash if downloading_torrents else None
         
-        # 2. 如果当前有任务在下载
         if current_active_hash:
             current_active_name = downloading_torrents[0].name
-            
-            # A. 任务哈希匹配：继续计时
             if current_active_hash == ACTIVE_DOWNLOAD_TRACKER['hash']:
                 return
-            
-            # B. 任务哈希不匹配 (新任务开始下载或旧任务完成/被删除)
             else:
                 if ACTIVE_DOWNLOAD_TRACKER['hash']:
-                    # 只有当旧任务和新任务的哈希不匹配时，才打印旧任务停止计时的信息
                     timeout_hours_old = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] / 3600
                     logger.info(f"下载任务已切换/完成。旧任务 {ACTIVE_DOWNLOAD_TRACKER['name'][:30]}... 停止计时 ({timeout_hours_old:.2f}小时)。")
                     
-                # --- 新任务逻辑 ---
-                # 必须获取完整的任务信息来计算大小
                 torrent_info = client.torrents_info(torrent_hashes=current_active_hash)[0]
-                
-                # 计算超时时间 (10 GB / 1 小时)
                 total_size_gb = torrent_info.total_size / (1024**3)
                 
-                # Max time in hours = (Total Size in GB) / (GB per Hour)
-                # 至少给予 10GB 的保底超时时间，防止容量极小的种子超时过短
                 base_gb = max(total_size_gb, 10.0) 
                 
                 timeout_hours = base_gb / TIMEOUT_GB_PER_HOUR
                 timeout_seconds = timeout_hours * 3600
                 
-                # 记录新的任务信息并重置计时
                 ACTIVE_DOWNLOAD_TRACKER = {
                     'hash': current_active_hash,
                     'start_time': time.time(),
                     'name': current_active_name,
-                    'timeout_seconds': timeout_seconds # 存储计算出的超时秒数
+                    'timeout_seconds': timeout_seconds 
                 }
                 
                 timeout_str = format_seconds_to_ddhhmm(timeout_seconds)
                 logger.info(f"新下载任务 {current_active_name[:30]}... 开始计时 (容量: {total_size_gb:.2f} GB, 超时: {timeout_str})。")
 
-        # 3. 如果当前没有任务在下载
         else:
             if ACTIVE_DOWNLOAD_TRACKER['hash']:
                 timeout_hours_old = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] / 3600
                 logger.info(f"下载任务已完成/停止。任务 {ACTIVE_DOWNLOAD_TRACKER['name'][:30]}... 停止计时 ({timeout_hours_old:.2f}小时)。")
             
-            # 清除计时器
             ACTIVE_DOWNLOAD_TRACKER = {'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0}
             
     except Exception as e:
         logger.error(f"更新下载计时器状态失败: {e}")
-        # 如果出错，为安全起见，暂时停止跟踪
         ACTIVE_DOWNLOAD_TRACKER = {'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0}
 
 def check_for_timeout_and_delete(client):
-    """检查活动下载任务是否超时，如果超时则删除并标记种子"""
+    """检查活动下载任务是否超时"""
     global ACTIVE_DOWNLOAD_TRACKER
     
     if ACTIVE_DOWNLOAD_TRACKER['hash']:
@@ -429,14 +402,8 @@ def check_for_timeout_and_delete(client):
             t_name = ACTIVE_DOWNLOAD_TRACKER['name']
             
             logger.warning(f"任务 {t_name} 下载超时 ({format_seconds_to_ddhhmm(elapsed)})，开始执行清理...")
-            
-            # 1. 执行清理操作
             cleanup_slow_torrent(client, t_hash, t_name)
-            
-            # 2. 清除跟踪记录
             ACTIVE_DOWNLOAD_TRACKER = {'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0}
-            
-            # 返回 True 表示已执行清理，外部循环可能需要立即重新检查下载状态
             return True
         else:
             remaining = timeout_seconds - elapsed
@@ -444,81 +411,47 @@ def check_for_timeout_and_delete(client):
             
     return False
 
+def initialize_download_tracker(client):
+    """启动时初始化下载计时器"""
+    check_and_update_active_download(client)
+
 def kickstart_seeding_tasks(client):
-    """(v3.8) 批量重启 Kickstart 队列中的任务"""
-    global TORRENTS_TO_KICKSTART
+    """(v3.11/v4.0) 按完成时间排序，批量重启最新的 N * Multiplier 个任务"""
+    global KICKSTART_MULTIPLIER
     
-    # 1. 检查队列是否为空
-    if not TORRENTS_TO_KICKSTART:
-        logger.info("Kickstart 队列为空，没有任务可以重启。")
-        return
-
-    logger.warning(">>> 触发 Kickstart 机制：磁盘空间长期不足，准备批量重启待处理任务...")
-
-    # 2. 准备批次
-    all_hashes = list(TORRENTS_TO_KICKSTART)
-    # 取前 N 个，如果不足 N 个，切片会自动取所有
-    batch_hashes = all_hashes[:KICKSTART_BATCH_SIZE]
-    
-    # 用于收集真正要执行操作的有效哈希
-    valid_exec_list = []
-    # 用于收集无论是否成功都需要从全局队列移除的哈希 (包括不存在的、执行过的)
-    removal_list = []
+    logger.warning(f">>> 触发 Kickstart 机制 (第 {KICKSTART_MULTIPLIER} 轮)：磁盘空间长期不足，尝试重启最新的 {KICKSTART_BATCH_SIZE * KICKSTART_MULTIPLIER} 个任务...")
 
     try:
-        # 3. 批量查询状态，进行筛选
-        # 获取这一批次的任务详情
-        t_info_list = client.torrents_info(torrent_hashes=batch_hashes)
+        all_auto_tasks = client.torrents_info(tag=TORRENT_TAG)
+        completed_tasks = [t for t in all_auto_tasks if t.progress >= 1.0]
         
-        # 建立映射方便查找：hash -> task_info
-        found_map = {t.hash: t for t in t_info_list}
-        
-        for h in batch_hashes:
-            if h not in found_map:
-                # 情况 A: 任务在 qBittorrent 中已不存在
-                logger.warning(f"Kickstart 任务 {h[:10]} 不存在，将从队列移除。")
-                removal_list.append(h)
-                continue
-            
-            t = found_map[h]
-            if t.progress < 1.0:
-                # 情况 B: 任务还未下载完成
-                logger.warning(f"Kickstart 任务 {t.name[:20]}... 尚未完成 ({t.progress*100:.1f}%)，保留在队列中跳过。")
-                # 保留未完成的任务，以便它完成下载后在后续 Kickstart 循环中被处理
-                continue
-            
-            # 情况 C: 任务有效且已完成 (progress >= 1.0)
-            valid_exec_list.append(h)
-            removal_list.append(h) # 执行后需要移除
+        if not completed_tasks:
+            logger.info("未找到已完成的任务，无法执行 Kickstart。")
+            return
 
-        # 4. 批量执行操作
-        if valid_exec_list:
-            logger.info(f"开始批量 Kickstart {len(valid_exec_list)} 个任务...")
-            
-            # 4.1 暂停
-            client.torrents_pause(torrent_hashes=valid_exec_list)
-            logger.info(f"已批量暂停 {len(valid_exec_list)} 个任务，等待 5 秒...")
-            time.sleep(5)
-            
-            # 4.2 恢复
-            client.torrents_resume(torrent_hashes=valid_exec_list)
-            logger.info(f"已批量恢复 {len(valid_exec_list)} 个任务，等待 5 秒...")
-            time.sleep(5)
-            
-            # 4.3 Reannounce
-            client.torrents_reannounce(torrent_hashes=valid_exec_list)
-            logger.info(f"已批量 Reannounce {len(valid_exec_list)} 个任务。")
-            
-            logger.info(f"批量 Kickstart 完成。")
-        else:
-            logger.info("本批次没有需要执行 Kickstart 的有效任务。")
-
-        # 5. 从全局队列中移除已处理或失效的任务
-        for h in removal_list:
-            if h in TORRENTS_TO_KICKSTART:
-                TORRENTS_TO_KICKSTART.remove(h)
+        completed_tasks.sort(key=lambda t: t.completion_on, reverse=True)
+        target_count = KICKSTART_BATCH_SIZE * KICKSTART_MULTIPLIER
+        target_batch = completed_tasks[:target_count]
+        target_hashes = [t.hash for t in target_batch]
         
-        logger.info(f"已更新队列，剩余待处理 Kickstart 任务数: {len(TORRENTS_TO_KICKSTART)}")
+        if not target_hashes:
+            return
+
+        logger.info(f"选中了 {len(target_hashes)} 个最新任务进行重启 (最新任务: {target_batch[0].name[:20]}...)")
+
+        client.torrents_pause(torrent_hashes=target_hashes)
+        logger.info(f"已批量暂停 {len(target_hashes)} 个任务，等待 5 秒...")
+        time.sleep(5)
+        
+        client.torrents_resume(torrent_hashes=target_hashes)
+        logger.info(f"已批量恢复 {len(target_hashes)} 个任务，等待 5 秒...")
+        time.sleep(5)
+        
+        client.torrents_reannounce(torrent_hashes=target_hashes)
+        logger.info(f"已批量 Reannounce {len(target_hashes)} 个任务。")
+        
+        KICKSTART_MULTIPLIER += 1
+        logger.info(f"Kickstart 完成。倍增计数器已升级为 {KICKSTART_MULTIPLIER}。")
 
     except Exception as e:
         logger.error(f"执行批量 Kickstart 失败: {e}")
@@ -528,7 +461,9 @@ def kickstart_seeding_tasks(client):
 # ==========================================
 
 def main():
-    logger.info("脚本服务 v3.9 已启动...")
+    global KICKSTART_MULTIPLIER
+    logger.info("脚本服务 v4.0 已启动...")
+    logger.info(f"日志时间时区设置为: UTC+{LOG_TIMEZONE_HOURS}")
     Path(TORRENT_LIB_PATH).mkdir(parents=True, exist_ok=True)
     
     client = None
@@ -544,8 +479,7 @@ def main():
                 logger.info("尝试连接 qBittorrent...")
                 client = get_qb_client()
                 logger.info("连接成功。")
-                # V3.5: 启动时初始化 Kickstart 队列
-                initialize_kickstart_queue(client)
+                initialize_download_tracker(client)
 
             current_time = time.time()
 
@@ -561,36 +495,29 @@ def main():
             # -------------------------------------------------
             while has_unfinished_downloads(client):
                 
-                # V3.9 核心逻辑：检查和更新当前下载任务状态及动态超时
                 check_and_update_active_download(client)
                 
                 if check_for_timeout_and_delete(client):
-                    # 如果任务因超时被删除，立即重新检查下载状态，不等待
                     continue
                 
                 pending_count = count_unadded_torrents(client)
                 count_msg = f"{pending_count}" if pending_count >= 0 else "未知"
                 
-                # --- NEW LOGIC FOR STATUS DISPLAY (v3.9) ---
                 eta_display = "N/A"
                 timeout_remaining_display = "N/A"
                 
                 if ACTIVE_DOWNLOAD_TRACKER['hash']:
-                    # 尝试获取 ETA
                     try:
                         active_torrent = client.torrents_info(torrent_hashes=ACTIVE_DOWNLOAD_TRACKER['hash'])[0]
-                        # qBittorrent 返回的 eta 字段就是秒数
                         eta_seconds = active_torrent.eta
                         eta_display = format_seconds_to_ddhhmm(eta_seconds)
-                    except Exception as e:
-                        logger.warning(f"获取活动任务 ETA 失败: {e}")
+                    except Exception:
+                        pass
                         
-                    # 计算剩余超时时间
                     elapsed = time.time() - ACTIVE_DOWNLOAD_TRACKER['start_time']
-                    timeout_remaining_seconds = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] - elapsed
-                    timeout_remaining_display = format_seconds_to_ddhhmm(timeout_remaining_seconds)
+                    remaining = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] - elapsed
+                    timeout_remaining_display = format_seconds_to_ddhhmm(remaining)
                 
-                # NEW Log Message
                 log_message = (
                     f"当前仍有未完成的下载任务... [待添加种子: {count_msg} 个] "
                     f"[ETA: {eta_display}] [超时剩余: {timeout_remaining_display}]"
@@ -603,10 +530,9 @@ def main():
                     last_stalled_check_time = time.time()
 
             # -------------------------------------------------
-            # 步骤 1.5: 初始做种保护期 (下载完成后的首次检测)
+            # 步骤 1.5: 初始做种保护期
             # -------------------------------------------------
             while True:
-                # 确保下载跟踪器在任务完成时已清除
                 check_and_update_active_download(client) 
                 
                 logger.info(f"正在进行 {UPLOAD_SAMPLE_DURATION} 秒的上传速度采样...")
@@ -629,7 +555,7 @@ def main():
             cleanup_files()
 
             # -------------------------------------------------
-            # 步骤 3-5: 添加新任务 & 磁盘死锁检测
+            # 步骤 3-5: 添加新任务 & 磁盘死锁检测 (v4.0 核心更新)
             # -------------------------------------------------
             torrent_added = False
             
@@ -642,31 +568,52 @@ def main():
                 remote_hashes = {t.hash.lower() for t in remote_torrents}
                 
                 lib_path = Path(TORRENT_LIB_PATH)
+                
                 candidate_path = None
                 candidate_size = 0
                 candidate_hash = None 
-                found_new = False
+                
+                found_any_new = False
+                min_size_blocked = float('inf') # 记录被阻塞种子中最小的那个，用于日志
                 
                 torrent_files = sorted(lib_path.glob('*.torrent'))
+                
+                # V4.0 LOGIC: 遍历所有新种子，寻找一个能放得下的
                 for t_file in torrent_files:
                     t_hash, t_size = get_torrent_info_from_file(t_file)
-                    # 排除已标记为慢速或死档的文件
+                    
                     if t_file.name.endswith(('.slow', '.dead')): 
-                        logger.debug(f"跳过已标记种子: {t_file.name}")
                         continue 
 
                     if not t_hash: continue
+                    
                     if t_hash not in remote_hashes:
-                        candidate_path = t_file
-                        candidate_size = t_size
-                        candidate_hash = t_hash
-                        found_new = True
-                        logger.info(f"发现新种子: {t_file.name}, 大小: {t_size / (1024**3):.2f} GB")
-                        break 
+                        # 这是一个新种子
+                        found_any_new = True
+                        
+                        # 立即检查空间
+                        space_ok, free_bytes = check_disk_space(t_size)
+                        
+                        if space_ok:
+                            # 找到一个合适的！立即选中并跳出循环
+                            candidate_path = t_file
+                            candidate_size = t_size
+                            candidate_hash = t_hash
+                            logger.info(f"发现新种子且空间足够: {t_file.name}, 大小: {t_size / (1024**3):.2f} GB")
+                            break # 跳出 for 循环，准备添加
+                        else:
+                            # 空间不足，记录一下，继续找下一个
+                            if t_size < min_size_blocked:
+                                min_size_blocked = t_size
                 
-                if not found_new:
+                if not found_any_new:
                     logger.info(f"没有发现新种子，等待 {WAIT_NO_TORRENT} 秒后重新扫描...")
                     disk_full_start_time = None 
+                    
+                    if KICKSTART_MULTIPLIER > 1:
+                        logger.info(f"无新种子压力，重置 Kickstart 倍增计数器为 1。")
+                        KICKSTART_MULTIPLIER = 1
+                    
                     time.sleep(WAIT_NO_TORRENT)
                     
                     if time.time() - last_stalled_check_time > INTERVAL_STALLED_CHECK:
@@ -674,12 +621,15 @@ def main():
                         last_stalled_check_time = time.time()
                     continue 
                 
-                space_ok, free_bytes = check_disk_space(candidate_size)
-                
-                if space_ok:
-                    disk_full_start_time = None # 空间足够，清零倒计时
+                # 如果跳出循环且有 candidate_path，说明找到了合适的
+                if candidate_path:
+                    disk_full_start_time = None 
                     
-                    logger.info(f"磁盘空间充足，开始添加任务: {candidate_path.name}")
+                    if KICKSTART_MULTIPLIER > 1:
+                        logger.info(f"磁盘空间充足，重置 Kickstart 倍增计数器为 1。")
+                        KICKSTART_MULTIPLIER = 1
+                    
+                    logger.info(f"开始添加任务: {candidate_path.name}")
                     try:
                         with open(candidate_path, 'rb') as f:
                             client.torrents_add(
@@ -692,13 +642,6 @@ def main():
                         if verify_torrent_added(client, candidate_hash):
                             logger.info(f"任务确认已上线: {candidate_path.name}")
                             torrent_added = True
-                            
-                            # 成功添加的任务加入 Kickstart 队列
-                            TORRENTS_TO_KICKSTART.add(candidate_hash)
-                            logger.info(f"新添加任务 {candidate_hash[:10]} 已加入 Kickstart 队列。")
-                            
-                            # V3.9: 新任务的计时将在下一轮 while has_unfinished_downloads 循环开始时设置
-                            
                             time.sleep(WAIT_AFTER_ADD)
                         else:
                             logger.error("超时：任务未出现在列表中，可能添加失败或客户端响应慢。")
@@ -708,33 +651,37 @@ def main():
                         logger.error(f"添加种子失败: {e}")
                         time.sleep(10)
                 else:
-                    # >>> 磁盘不足时，先检查上传速度 <<<
+                    # 遍历了所有新种子，没有任何一个能放下 -> 真正的磁盘空间不足
+                    # 使用 min_size_blocked 作为日志中的“需要空间”参考值
+                    display_needed_size = min_size_blocked if min_size_blocked != float('inf') else 0
+                    
+                    # 获取最新剩余空间用于日志
+                    usage = shutil.disk_usage(LOCAL_PATH)
+                    free_bytes_log = usage.free
+                    
                     logger.info("磁盘不足，正在检测上传速度以决定是否延迟 Kickstart...")
                     avg_speed = measure_average_upload_speed(client, duration=UPLOAD_SAMPLE_DURATION)
 
                     if avg_speed > UPLOAD_SPEED_THRESHOLD_KB:
-                        # 速度高，进入“保护期”逻辑
                         logger.info(f"虽然磁盘不足，但当前平均上传速度较高 ({avg_speed:.1f} KB/s)。"
                                     f"重置 Kickstart 倒计时，并继续做种等待 {WAIT_UPLOAD_CHECK/60:.0f} 分钟...")
                         
-                        disk_full_start_time = None # 关键：重置倒计时
-                        time.sleep(WAIT_UPLOAD_CHECK) # 长等待，类似做种保护
+                        disk_full_start_time = None 
+                        time.sleep(WAIT_UPLOAD_CHECK) 
                         
-                        # 等待期间顺便检查死任务
                         if time.time() - last_stalled_check_time > INTERVAL_STALLED_CHECK:
                             process_stalled_tasks(client)
                             last_stalled_check_time = time.time()
                             
                     else:
-                        # 速度低，执行 Kickstart 倒计时逻辑
                         if disk_full_start_time is None:
                             disk_full_start_time = time.time()
                         
                         elapsed = time.time() - disk_full_start_time
                         remaining = DURATION_DISK_DEADLOCK - elapsed
                         
-                        logger.warning(f"磁盘空间不足 (上传速度 {avg_speed:.1f} KB/s)! 需要: {(candidate_size / 1024**3):.2f} GB, 剩余: {(free_bytes / 1024**3):.2f} GB. "
-                                       f"Kickstart 倒计时: {remaining:.0f} 秒")
+                        logger.warning(f"磁盘空间不足 (上传速度 {avg_speed:.1f} KB/s)! 最小待添加种子需要: {(display_needed_size / 1024**3):.2f} GB, 剩余: {(free_bytes_log / 1024**3):.2f} GB. "
+                                       f"Kickstart 倒计时: {remaining:.0f} 秒 (当前倍数: {KICKSTART_MULTIPLIER})")
                         
                         if elapsed > DURATION_DISK_DEADLOCK:
                             kickstart_seeding_tasks(client)
