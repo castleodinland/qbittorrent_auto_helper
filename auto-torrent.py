@@ -38,8 +38,8 @@ DISK_RESERVE_GB = 2.0
 # 新增下载任务的标签
 TORRENT_TAG = 'auto-add'
 
-# 日志文件名 (已更新到 v4.0)
-LOG_FILENAME = 'auto-torrent-v4.0.log'
+# 日志文件名 (已更新到 v4.5)
+LOG_FILENAME = 'auto-torrent-v4.5.log'
 
 # --- 时区配置 ---
 # 日志时间显示时区 (小时): 默认 UTC+8 (北京时间)
@@ -62,7 +62,18 @@ UPLOAD_SAMPLE_DURATION = 30      # (30秒) 速度检测的采样时长
 
 # --- 动态下载超时配置 ---
 # 下载超时基准：每 10GB 给予 1 小时
-TIMEOUT_GB_PER_HOUR = 15 
+TIMEOUT_GB_PER_HOUR = 10 
+
+# --- v4.2/v4.3 多阶段早期慢速淘汰配置 (Fail Fast) ---
+EARLY_CHECK_ENABLE = True
+# 检查点列表: [(时间经过比例, 最低进度比例)]
+# 脚本会自动寻找当前时间“刚刚跨过”的那个检查点进行判定
+EARLY_CHECK_POINTS = [
+    (0.2, 0.1),  # 耗时达到 20% 时，进度至少要有 10%
+    (0.4, 0.3),  # 耗时达到 40% 时，进度至少要有 30%
+    (0.6, 0.5),  # 耗时达到 60% 时，进度至少要有 50%
+    (0.8, 0.7)   # 耗时达到 80% 时，进度至少要有 70%
+]
 
 # --- Kickstart 批量配置 ---
 KICKSTART_BATCH_SIZE = 5         # 每次触发 Kickstart 的基础数量 N
@@ -72,7 +83,14 @@ KICKSTART_BATCH_SIZE = 5         # 每次触发 Kickstart 的基础数量 N
 # ==========================================
 
 # 跟踪当前唯一的正在下载的任务
-ACTIVE_DOWNLOAD_TRACKER = {'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0}
+# v4.4 新增 'checked_points': set() 用于记录已通过的检查点
+ACTIVE_DOWNLOAD_TRACKER = {
+    'hash': None, 
+    'start_time': None, 
+    'name': None, 
+    'timeout_seconds': 0.0, 
+    'checked_points': set()
+}
 
 # Kickstart 倍增计数器
 KICKSTART_MULTIPLIER = 1
@@ -208,8 +226,8 @@ def cleanup_files():
     
     whitelist_extensions = ['.py', '.sh', '.log']
     whitelist_dirs = ['torrent-lib', '.git', '__pycache__']
-    # 保护 v4.0 版本的脚本自身
-    whitelist_files = [LOG_FILENAME, 'auto-torrent-v4.0.py'] 
+    # 保护 v4.5 版本的脚本自身
+    whitelist_files = [LOG_FILENAME, 'auto-torrent-v4.5.py'] 
     
     lib_path_abs = Path(TORRENT_LIB_PATH).absolute()
 
@@ -250,8 +268,8 @@ def check_disk_space(required_bytes):
 
 def cleanup_slow_torrent(client, t_hash, t_name):
     """删除慢速任务及其数据，并将种子文件标记为 .slow"""
+    # 计算超时时间 (只用于日志)
     timeout_hours = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] / 3600
-    logger.warning(f"下载超时 ({timeout_hours:.2f}小时): 任务 {t_name} (Hash: {t_hash[:10]}) 未完成，开始清理...")
     
     try:
         client.torrents_delete(torrent_hashes=t_hash, delete_files=True)
@@ -298,6 +316,7 @@ def process_stalled_tasks(client):
             
             if t.hash in local_torrents_map:
                 src_file = local_torrents_map[t.hash]
+                # 区别于 .slow，使用 .dead
                 new_name = src_file.with_name(src_file.name + ".dead") 
                 try:
                     src_file.rename(new_name)
@@ -344,7 +363,7 @@ def format_seconds_to_ddhhmm(seconds):
     return f"{days:02d}d{hours:02d}h{minutes:02d}m"
 
 def check_and_update_active_download(client):
-    """检查当前活动的下载任务是否已改变或完成，并动态计算超时时间"""
+    """(v4.5) 检查当前活动的下载任务是否已改变或完成，并动态计算超时时间"""
     global ACTIVE_DOWNLOAD_TRACKER
     
     try:
@@ -353,8 +372,12 @@ def check_and_update_active_download(client):
         
         if current_active_hash:
             current_active_name = downloading_torrents[0].name
+            
+            # A. 任务哈希匹配：继续计时
             if current_active_hash == ACTIVE_DOWNLOAD_TRACKER['hash']:
                 return
+            
+            # B. 任务哈希不匹配 (新任务开始下载或旧任务完成/被删除)
             else:
                 if ACTIVE_DOWNLOAD_TRACKER['hash']:
                     timeout_hours_old = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] / 3600
@@ -363,6 +386,12 @@ def check_and_update_active_download(client):
                 torrent_info = client.torrents_info(torrent_hashes=current_active_hash)[0]
                 total_size_gb = torrent_info.total_size / (1024**3)
                 
+                # --- v4.5: 使用任务真实的 added_on 时间作为起始时间，实现重启后继续计时 ---
+                active_start_time = torrent_info.added_on
+                # 容错：如果API返回异常值（<=0），回退到当前时间
+                if active_start_time <= 0:
+                    active_start_time = time.time()
+                
                 base_gb = max(total_size_gb, 10.0) 
                 
                 timeout_hours = base_gb / TIMEOUT_GB_PER_HOUR
@@ -370,41 +399,107 @@ def check_and_update_active_download(client):
                 
                 ACTIVE_DOWNLOAD_TRACKER = {
                     'hash': current_active_hash,
-                    'start_time': time.time(),
+                    'start_time': active_start_time,
                     'name': current_active_name,
-                    'timeout_seconds': timeout_seconds 
+                    'timeout_seconds': timeout_seconds,
+                    'checked_points': set()
                 }
                 
                 timeout_str = format_seconds_to_ddhhmm(timeout_seconds)
-                logger.info(f"新下载任务 {current_active_name[:30]}... 开始计时 (容量: {total_size_gb:.2f} GB, 超时: {timeout_str})。")
+                # 计算已经过去的时间，用于日志显示
+                elapsed_since_add = time.time() - active_start_time
+                elapsed_str = format_seconds_to_ddhhmm(elapsed_since_add)
+                
+                logger.info(f"发现/跟踪下载任务 {current_active_name[:30]}... (容量: {total_size_gb:.2f} GB)。")
+                logger.info(f"任务添加于 {elapsed_str} 前。动态超时设定: {timeout_str}。")
 
         else:
             if ACTIVE_DOWNLOAD_TRACKER['hash']:
                 timeout_hours_old = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] / 3600
                 logger.info(f"下载任务已完成/停止。任务 {ACTIVE_DOWNLOAD_TRACKER['name'][:30]}... 停止计时 ({timeout_hours_old:.2f}小时)。")
             
-            ACTIVE_DOWNLOAD_TRACKER = {'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0}
+            ACTIVE_DOWNLOAD_TRACKER = {
+                'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0, 'checked_points': set()
+            }
             
     except Exception as e:
         logger.error(f"更新下载计时器状态失败: {e}")
-        ACTIVE_DOWNLOAD_TRACKER = {'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0}
+        ACTIVE_DOWNLOAD_TRACKER = {
+            'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0, 'checked_points': set()
+        }
 
 def check_for_timeout_and_delete(client):
-    """检查活动下载任务是否超时"""
+    """(v4.4) 检查活动下载任务是否超时或满足多阶段早期淘汰条件"""
     global ACTIVE_DOWNLOAD_TRACKER
     
     if ACTIVE_DOWNLOAD_TRACKER['hash']:
         elapsed = time.time() - ACTIVE_DOWNLOAD_TRACKER['start_time']
         timeout_seconds = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds']
         
+        # 1. 常规超时检查
         if elapsed > timeout_seconds:
             t_hash = ACTIVE_DOWNLOAD_TRACKER['hash']
             t_name = ACTIVE_DOWNLOAD_TRACKER['name']
             
             logger.warning(f"任务 {t_name} 下载超时 ({format_seconds_to_ddhhmm(elapsed)})，开始执行清理...")
             cleanup_slow_torrent(client, t_hash, t_name)
-            ACTIVE_DOWNLOAD_TRACKER = {'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0}
+            ACTIVE_DOWNLOAD_TRACKER = {
+                'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0, 'checked_points': set()
+            }
             return True
+            
+        # 2. 多阶段早期慢速淘汰检查 (Fail Fast)
+        elif EARLY_CHECK_ENABLE and timeout_seconds > 0:
+            elapsed_ratio = elapsed / timeout_seconds
+            
+            target_checkpoint = None
+            
+            sorted_points = sorted(EARLY_CHECK_POINTS, key=lambda x: x[0], reverse=True)
+            
+            for time_r, prog_r in sorted_points:
+                if elapsed_ratio >= time_r:
+                    target_checkpoint = (time_r, prog_r)
+                    break
+            
+            if target_checkpoint:
+                check_time_r, check_prog_r = target_checkpoint
+                
+                # v4.4: 检查是否已经记录过该检查点
+                if check_time_r not in ACTIVE_DOWNLOAD_TRACKER.get('checked_points', set()):
+                    try:
+                        t_info_list = client.torrents_info(torrent_hashes=ACTIVE_DOWNLOAD_TRACKER['hash'])
+                        if not t_info_list:
+                            ACTIVE_DOWNLOAD_TRACKER = {
+                                'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0, 'checked_points': set()
+                            }
+                            return False
+                            
+                        t_info = t_info_list[0]
+                        current_progress = t_info.progress # 0.0 ~ 1.0
+                        
+                        if current_progress < check_prog_r:
+                            # 检查失败，执行清理
+                            t_hash = ACTIVE_DOWNLOAD_TRACKER['hash']
+                            t_name = ACTIVE_DOWNLOAD_TRACKER['name']
+                            
+                            logger.warning(f"早期慢速淘汰触发: 任务 {t_name[:20]}... 耗时已过 {elapsed_ratio*100:.1f}% ({format_seconds_to_ddhhmm(elapsed)})，"
+                                           f"处于 {check_time_r*100:.0f}% 检查点，但进度仅 {current_progress*100:.1f}% (低于要求的 {check_prog_r*100:.0f}%)，判定为慢速。")
+                            
+                            cleanup_slow_torrent(client, t_hash, t_name)
+                            ACTIVE_DOWNLOAD_TRACKER = {
+                                'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0, 'checked_points': set()
+                            }
+                            return True
+                        else:
+                            # 检查通过，加入已检查集合
+                            ACTIVE_DOWNLOAD_TRACKER['checked_points'].add(check_time_r)
+                            t_name = ACTIVE_DOWNLOAD_TRACKER['name']
+                            logger.info(f"早期慢速检查通过: 任务 {t_name[:20]}... 耗时 {elapsed_ratio*100:.1f}% ({format_seconds_to_ddhhmm(elapsed)})，"
+                                        f"进度 {current_progress*100:.1f}% (>= 检查点 {check_time_r*100:.0f}% 的最低要求 {check_prog_r*100:.0f}%)。")
+                            
+                    except Exception as e:
+                        logger.warning(f"执行早期慢速检查时出错: {e}")
+
         else:
             remaining = timeout_seconds - elapsed
             logger.debug(f"任务 {ACTIVE_DOWNLOAD_TRACKER['name'][:30]}... 剩余超时时间: {format_seconds_to_ddhhmm(remaining)}")
@@ -462,7 +557,7 @@ def kickstart_seeding_tasks(client):
 
 def main():
     global KICKSTART_MULTIPLIER
-    logger.info("脚本服务 v4.0 已启动...")
+    logger.info("脚本服务 v4.5 已启动...")
     logger.info(f"日志时间时区设置为: UTC+{LOG_TIMEZONE_HOURS}")
     Path(TORRENT_LIB_PATH).mkdir(parents=True, exist_ok=True)
     
@@ -497,6 +592,7 @@ def main():
                 
                 check_and_update_active_download(client)
                 
+                # v4.4: 包含检查通过日志
                 if check_for_timeout_and_delete(client):
                     continue
                 
@@ -555,7 +651,7 @@ def main():
             cleanup_files()
 
             # -------------------------------------------------
-            # 步骤 3-5: 添加新任务 & 磁盘死锁检测 (v4.0 核心更新)
+            # 步骤 3-5: 添加新任务 & 磁盘死锁检测
             # -------------------------------------------------
             torrent_added = False
             
@@ -574,11 +670,10 @@ def main():
                 candidate_hash = None 
                 
                 found_any_new = False
-                min_size_blocked = float('inf') # 记录被阻塞种子中最小的那个，用于日志
+                min_size_blocked = float('inf') 
                 
                 torrent_files = sorted(lib_path.glob('*.torrent'))
                 
-                # V4.0 LOGIC: 遍历所有新种子，寻找一个能放得下的
                 for t_file in torrent_files:
                     t_hash, t_size = get_torrent_info_from_file(t_file)
                     
@@ -588,21 +683,16 @@ def main():
                     if not t_hash: continue
                     
                     if t_hash not in remote_hashes:
-                        # 这是一个新种子
                         found_any_new = True
-                        
-                        # 立即检查空间
                         space_ok, free_bytes = check_disk_space(t_size)
                         
                         if space_ok:
-                            # 找到一个合适的！立即选中并跳出循环
                             candidate_path = t_file
                             candidate_size = t_size
                             candidate_hash = t_hash
                             logger.info(f"发现新种子且空间足够: {t_file.name}, 大小: {t_size / (1024**3):.2f} GB")
-                            break # 跳出 for 循环，准备添加
+                            break 
                         else:
-                            # 空间不足，记录一下，继续找下一个
                             if t_size < min_size_blocked:
                                 min_size_blocked = t_size
                 
@@ -621,7 +711,6 @@ def main():
                         last_stalled_check_time = time.time()
                     continue 
                 
-                # 如果跳出循环且有 candidate_path，说明找到了合适的
                 if candidate_path:
                     disk_full_start_time = None 
                     
@@ -651,11 +740,7 @@ def main():
                         logger.error(f"添加种子失败: {e}")
                         time.sleep(10)
                 else:
-                    # 遍历了所有新种子，没有任何一个能放下 -> 真正的磁盘空间不足
-                    # 使用 min_size_blocked 作为日志中的“需要空间”参考值
                     display_needed_size = min_size_blocked if min_size_blocked != float('inf') else 0
-                    
-                    # 获取最新剩余空间用于日志
                     usage = shutil.disk_usage(LOCAL_PATH)
                     free_bytes_log = usage.free
                     
