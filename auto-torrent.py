@@ -38,8 +38,8 @@ DISK_RESERVE_GB = 2.0
 # 新增下载任务的标签
 TORRENT_TAG = 'auto-add'
 
-# 日志文件名 (已更新到 v4.5)
-LOG_FILENAME = 'auto-torrent-v4.5.log'
+# 日志文件名 (已更新到 v4.7)
+LOG_FILENAME = 'auto-torrent-v4.7.log'
 
 # --- 时区配置 ---
 # 日志时间显示时区 (小时): 默认 UTC+8 (北京时间)
@@ -53,7 +53,11 @@ WAIT_AFTER_ADD = 5             # 添加种子后的缓冲时间
 
 # 维护与死锁检测配置
 INTERVAL_STALLED_CHECK = 1800  # (30分钟) 检查死任务(Stalled)的间隔
-DURATION_DISK_DEADLOCK = 600   # (10分钟) 连续磁盘不足触发重启的时间阈值
+DURATION_DISK_DEADLOCK = 300   # (10分钟) 连续磁盘不足触发重启的时间阈值
+
+# --- v4.7 新增: 死任务误杀保护期 ---
+# 如果任务刚添加不足 X 分钟，即使处于 stalled 状态也不处理，防止误杀刚上线的新种
+STALLED_CHECK_GRACE_PERIOD_MINUTES = 10 
 
 # --- 上传速度检测配置 ---
 UPLOAD_SPEED_THRESHOLD_KB = 200  # (KB/s) 上传速度阈值 (平均值)
@@ -62,17 +66,16 @@ UPLOAD_SAMPLE_DURATION = 30      # (30秒) 速度检测的采样时长
 
 # --- 动态下载超时配置 ---
 # 下载超时基准：每 10GB 给予 1 小时
-TIMEOUT_GB_PER_HOUR = 10 
+TIMEOUT_GB_PER_HOUR = 12 
 
 # --- v4.2/v4.3 多阶段早期慢速淘汰配置 (Fail Fast) ---
 EARLY_CHECK_ENABLE = True
 # 检查点列表: [(时间经过比例, 最低进度比例)]
-# 脚本会自动寻找当前时间“刚刚跨过”的那个检查点进行判定
 EARLY_CHECK_POINTS = [
-    (0.2, 0.1),  # 耗时达到 20% 时，进度至少要有 10%
-    (0.4, 0.3),  # 耗时达到 40% 时，进度至少要有 30%
-    (0.6, 0.5),  # 耗时达到 60% 时，进度至少要有 50%
-    (0.8, 0.7)   # 耗时达到 80% 时，进度至少要有 70%
+    (0.2, 0.15),  # 耗时达到 20% 时，进度至少要有 10%
+    (0.4, 0.35),  # 耗时达到 40% 时，进度至少要有 30%
+    (0.6, 0.55),  # 耗时达到 60% 时，进度至少要有 50%
+    (0.8, 0.75)   # 耗时达到 80% 时，进度至少要有 70%
 ]
 
 # --- Kickstart 批量配置 ---
@@ -83,7 +86,6 @@ KICKSTART_BATCH_SIZE = 5         # 每次触发 Kickstart 的基础数量 N
 # ==========================================
 
 # 跟踪当前唯一的正在下载的任务
-# v4.4 新增 'checked_points': set() 用于记录已通过的检查点
 ACTIVE_DOWNLOAD_TRACKER = {
     'hash': None, 
     'start_time': None, 
@@ -226,8 +228,8 @@ def cleanup_files():
     
     whitelist_extensions = ['.py', '.sh', '.log']
     whitelist_dirs = ['torrent-lib', '.git', '__pycache__']
-    # 保护 v4.5 版本的脚本自身
-    whitelist_files = [LOG_FILENAME, 'auto-torrent-v4.5.py'] 
+    # 保护 v4.7 版本的脚本自身
+    whitelist_files = [LOG_FILENAME, 'auto-torrent-v4.7.py'] 
     
     lib_path_abs = Path(TORRENT_LIB_PATH).absolute()
 
@@ -266,9 +268,24 @@ def check_disk_space(required_bytes):
         logger.error(f"检查磁盘空间失败: {e}")
         return False, 0
 
+def safe_rename_with_suffix(src_path, suffix):
+    """安全重命名文件，如果目标存在则自动添加数字后缀"""
+    base_new_name = src_path.name + suffix
+    new_path = src_path.with_name(base_new_name)
+    
+    counter = 1
+    while new_path.exists():
+        new_path = src_path.with_name(f"{base_new_name}.{counter}")
+        counter += 1
+        
+    try:
+        src_path.rename(new_path)
+        return new_path
+    except Exception as e:
+        raise e
+
 def cleanup_slow_torrent(client, t_hash, t_name):
     """删除慢速任务及其数据，并将种子文件标记为 .slow"""
-    # 计算超时时间 (只用于日志)
     timeout_hours = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] / 3600
     
     try:
@@ -282,10 +299,9 @@ def cleanup_slow_torrent(client, t_hash, t_name):
     for t_file in lib_path.glob('*.torrent'):
         file_hash, _ = get_torrent_info_from_file(t_file)
         if file_hash == t_hash:
-            new_name = t_file.with_name(t_file.name + ".slow")
             try:
-                t_file.rename(new_name)
-                logger.warning(f"已将慢速种子文件标记为: {new_name.name}")
+                new_path = safe_rename_with_suffix(t_file, ".slow")
+                logger.warning(f"已将慢速种子文件标记为: {new_path.name}")
                 found = True
             except Exception as e:
                 logger.error(f"重命名慢速种子文件 {t_file.name} 失败: {e}")
@@ -295,7 +311,7 @@ def cleanup_slow_torrent(client, t_hash, t_name):
         logger.warning(f"未在 {TORRENT_LIB_PATH} 中找到对应的种子文件进行标记。")
 
 def process_stalled_tasks(client):
-    """处理死任务：删除任务、文件并重命名种子"""
+    """(v4.7 优化) 处理死任务，增加新任务保护期防止误杀"""
     logger.info("开始检查 Stalled (死) 任务...")
     try:
         stalled_torrents = client.torrents_info(status_filter='stalled_downloading')
@@ -311,16 +327,23 @@ def process_stalled_tasks(client):
             if t_hash:
                 local_torrents_map[t_hash] = t_file
 
+        current_time = time.time()
+        grace_period_seconds = STALLED_CHECK_GRACE_PERIOD_MINUTES * 60
+
         for t in stalled_torrents:
+            # v4.7: 检查是否处于保护期
+            elapsed_since_add = current_time - t.added_on
+            if elapsed_since_add < grace_period_seconds:
+                logger.info(f"Stalled 任务 {t.name[:20]}... 刚添加 {elapsed_since_add/60:.1f} 分钟，处于保护期内，跳过清理。")
+                continue
+
             logger.warning(f"发现死任务: {t.name} (Hash: {t.hash[:10]})，准备清理...")
             
             if t.hash in local_torrents_map:
                 src_file = local_torrents_map[t.hash]
-                # 区别于 .slow，使用 .dead
-                new_name = src_file.with_name(src_file.name + ".dead") 
                 try:
-                    src_file.rename(new_name)
-                    logger.info(f"已标记种子文件为死档: {new_name.name}")
+                    new_path = safe_rename_with_suffix(src_file, ".dead")
+                    logger.info(f"已标记种子文件为死档: {new_path.name}")
                 except Exception as e:
                     logger.error(f"重命名种子文件失败: {e}")
             else:
@@ -344,7 +367,10 @@ def count_unadded_torrents(client):
         count = 0
         for t_file in lib_path.glob('*.torrent'):
             t_hash, _ = get_torrent_info_from_file(t_file)
-            if t_hash and t_hash not in remote_hashes and not t_file.name.endswith(('.slow', '.dead')):
+            if t_file.name.find('.slow') != -1 or t_file.name.find('.dead') != -1:
+                continue
+
+            if t_hash and t_hash not in remote_hashes:
                 count += 1
         return count
     except Exception as e:
@@ -363,7 +389,7 @@ def format_seconds_to_ddhhmm(seconds):
     return f"{days:02d}d{hours:02d}h{minutes:02d}m"
 
 def check_and_update_active_download(client):
-    """(v4.5) 检查当前活动的下载任务是否已改变或完成，并动态计算超时时间"""
+    """检查当前活动的下载任务是否已改变或完成，并动态计算超时时间"""
     global ACTIVE_DOWNLOAD_TRACKER
     
     try:
@@ -386,9 +412,7 @@ def check_and_update_active_download(client):
                 torrent_info = client.torrents_info(torrent_hashes=current_active_hash)[0]
                 total_size_gb = torrent_info.total_size / (1024**3)
                 
-                # --- v4.5: 使用任务真实的 added_on 时间作为起始时间，实现重启后继续计时 ---
                 active_start_time = torrent_info.added_on
-                # 容错：如果API返回异常值（<=0），回退到当前时间
                 if active_start_time <= 0:
                     active_start_time = time.time()
                 
@@ -406,7 +430,6 @@ def check_and_update_active_download(client):
                 }
                 
                 timeout_str = format_seconds_to_ddhhmm(timeout_seconds)
-                # 计算已经过去的时间，用于日志显示
                 elapsed_since_add = time.time() - active_start_time
                 elapsed_str = format_seconds_to_ddhhmm(elapsed_since_add)
                 
@@ -429,7 +452,7 @@ def check_and_update_active_download(client):
         }
 
 def check_for_timeout_and_delete(client):
-    """(v4.4) 检查活动下载任务是否超时或满足多阶段早期淘汰条件"""
+    """检查活动下载任务是否超时或满足多阶段早期淘汰条件"""
     global ACTIVE_DOWNLOAD_TRACKER
     
     if ACTIVE_DOWNLOAD_TRACKER['hash']:
@@ -453,7 +476,6 @@ def check_for_timeout_and_delete(client):
             elapsed_ratio = elapsed / timeout_seconds
             
             target_checkpoint = None
-            
             sorted_points = sorted(EARLY_CHECK_POINTS, key=lambda x: x[0], reverse=True)
             
             for time_r, prog_r in sorted_points:
@@ -464,7 +486,6 @@ def check_for_timeout_and_delete(client):
             if target_checkpoint:
                 check_time_r, check_prog_r = target_checkpoint
                 
-                # v4.4: 检查是否已经记录过该检查点
                 if check_time_r not in ACTIVE_DOWNLOAD_TRACKER.get('checked_points', set()):
                     try:
                         t_info_list = client.torrents_info(torrent_hashes=ACTIVE_DOWNLOAD_TRACKER['hash'])
@@ -478,20 +499,16 @@ def check_for_timeout_and_delete(client):
                         current_progress = t_info.progress # 0.0 ~ 1.0
                         
                         if current_progress < check_prog_r:
-                            # 检查失败，执行清理
                             t_hash = ACTIVE_DOWNLOAD_TRACKER['hash']
                             t_name = ACTIVE_DOWNLOAD_TRACKER['name']
-                            
                             logger.warning(f"早期慢速淘汰触发: 任务 {t_name[:20]}... 耗时已过 {elapsed_ratio*100:.1f}% ({format_seconds_to_ddhhmm(elapsed)})，"
                                            f"处于 {check_time_r*100:.0f}% 检查点，但进度仅 {current_progress*100:.1f}% (低于要求的 {check_prog_r*100:.0f}%)，判定为慢速。")
-                            
                             cleanup_slow_torrent(client, t_hash, t_name)
                             ACTIVE_DOWNLOAD_TRACKER = {
                                 'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0, 'checked_points': set()
                             }
                             return True
                         else:
-                            # 检查通过，加入已检查集合
                             ACTIVE_DOWNLOAD_TRACKER['checked_points'].add(check_time_r)
                             t_name = ACTIVE_DOWNLOAD_TRACKER['name']
                             logger.info(f"早期慢速检查通过: 任务 {t_name[:20]}... 耗时 {elapsed_ratio*100:.1f}% ({format_seconds_to_ddhhmm(elapsed)})，"
@@ -557,7 +574,7 @@ def kickstart_seeding_tasks(client):
 
 def main():
     global KICKSTART_MULTIPLIER
-    logger.info("脚本服务 v4.5 已启动...")
+    logger.info("脚本服务 v4.7 已启动...")
     logger.info(f"日志时间时区设置为: UTC+{LOG_TIMEZONE_HOURS}")
     Path(TORRENT_LIB_PATH).mkdir(parents=True, exist_ok=True)
     
@@ -599,23 +616,35 @@ def main():
                 pending_count = count_unadded_torrents(client)
                 count_msg = f"{pending_count}" if pending_count >= 0 else "未知"
                 
+                # --- v4.7 日志增强 ---
                 eta_display = "N/A"
                 timeout_remaining_display = "N/A"
+                progress_display = "N/A"
+                elapsed_display = "N/A"
                 
                 if ACTIVE_DOWNLOAD_TRACKER['hash']:
                     try:
                         active_torrent = client.torrents_info(torrent_hashes=ACTIVE_DOWNLOAD_TRACKER['hash'])[0]
                         eta_seconds = active_torrent.eta
                         eta_display = format_seconds_to_ddhhmm(eta_seconds)
+                        # 获取实时进度
+                        progress_val = active_torrent.progress * 100
+                        progress_display = f"{progress_val:.1f}%"
                     except Exception:
                         pass
                         
                     elapsed = time.time() - ACTIVE_DOWNLOAD_TRACKER['start_time']
-                    remaining = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] - elapsed
+                    timeout_val = ACTIVE_DOWNLOAD_TRACKER['timeout_seconds']
+                    remaining = timeout_val - elapsed
                     timeout_remaining_display = format_seconds_to_ddhhmm(remaining)
+                    
+                    if timeout_val > 0:
+                        elapsed_percent = (elapsed / timeout_val) * 100
+                        elapsed_display = f"{elapsed_percent:.1f}%"
                 
                 log_message = (
                     f"当前仍有未完成的下载任务... [待添加种子: {count_msg} 个] "
+                    f"[进度: {progress_display}] [耗时: {elapsed_display}] "
                     f"[ETA: {eta_display}] [超时剩余: {timeout_remaining_display}]"
                 )
                 logger.info(log_message)
@@ -679,6 +708,10 @@ def main():
                     
                     if t_file.name.endswith(('.slow', '.dead')): 
                         continue 
+                        
+                    # v4.6: 跳过所有 .slow.1, .dead.2 这样的文件
+                    if '.slow' in t_file.name or '.dead' in t_file.name:
+                        continue
 
                     if not t_hash: continue
                     
