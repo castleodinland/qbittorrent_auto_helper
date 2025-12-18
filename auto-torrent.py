@@ -60,7 +60,7 @@ DURATION_DISK_DEADLOCK = 300   # (10分钟) 连续磁盘不足触发重启的时
 STALLED_CHECK_GRACE_PERIOD_MINUTES = 10 
 
 # --- 上传速度检测配置 ---
-UPLOAD_SPEED_THRESHOLD_KB = 200  # (KB/s) 上传速度阈值 (平均值)
+UPLOAD_SPEED_THRESHOLD_KB = 500  # (KB/s) 上传速度阈值 (平均值)
 WAIT_UPLOAD_CHECK = 300          # (5分钟) 上传速度高时的等待间隔
 UPLOAD_SAMPLE_DURATION = 30      # (30秒) 速度检测的采样时长
 
@@ -226,7 +226,7 @@ def cleanup_files():
     target_dir = Path(LOCAL_PATH).absolute()
     logger.info(f"执行目录清理: {target_dir}")
     
-    whitelist_extensions = ['.py', '.sh', '.log']
+    whitelist_extensions = ['.py', '.sh', '.log', '.go']
     whitelist_dirs = ['torrent-lib', '.git', '__pycache__']
     # 保护 v4.7 版本的脚本自身
     whitelist_files = [LOG_FILENAME, 'auto-torrent-v4.7.py'] 
