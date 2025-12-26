@@ -4,10 +4,16 @@ import shutil
 import hashlib
 import logging
 import sys
+import socket
+import struct
+import random
+import threading
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from qbittorrentapi import exceptions
 from datetime import datetime, timedelta
+
+import random
 
 # 尝试导入必要的库
 try:
@@ -41,7 +47,7 @@ TORRENT_TAG = 'auto-add'
 KEEP_TAG = 'keep'  # v4.13 新增: 保种标签
 
 # 日志文件名 (已更新到 v4.13)
-LOG_FILENAME = 'auto-torrent-v4.13.log'
+LOG_FILENAME = 'auto-torrent-v5.1.log'
 
 # --- Tracker 优先级配置 ---
 TRACKER_PRIORITY_LIST = [
@@ -97,6 +103,7 @@ ACTIVE_DOWNLOAD_TRACKER = {
 }
 
 KICKSTART_MULTIPLIER = 0
+CURRENT_SIM_SPEED_KB = 0
 
 # ==========================================
 # 日志配置
@@ -408,13 +415,121 @@ def kickstart_seeding_tasks(client):
     except Exception as e:
         logger.error(f"Kickstart 执行出错: {e}")
 
+
+# ==========================================
+# 模拟连接核心逻辑
+# ==========================================
+
+def generate_random_peer_id():
+    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_.!~*()"
+    suffix = "".join(random.choice(chars) for _ in range(12))
+    return "-qB4630-" + suffix
+
+def connect_peer_with_stop_py(peer_addr, info_hash_hex, stop_event, error_flag):
+    global CURRENT_SIM_SPEED_KB
+    
+    if ']:' in peer_addr: 
+        ip = peer_addr.split(']:')[0][1:]
+        port = int(peer_addr.split(']:')[1])
+    elif ':' in peer_addr: 
+        parts = peer_addr.split(':')
+        ip = parts[0]
+        port = int(parts[1])
+    else:
+        logger.error(f"[模拟连接] 地址格式无效: {peer_addr}")
+        error_flag.set()
+        return
+
+    info_hash_bytes = bytes.fromhex(info_hash_hex)
+    peer_id = generate_random_peer_id().encode()
+    
+    logger.info(f"[模拟连接] 尝试连接至 {ip}:{port}...")
+    try:
+        with socket.create_connection((ip, port), timeout=10) as sock:
+            handshake = b'\x13BitTorrent protocol' + b'\x00' * 8 + info_hash_bytes + peer_id
+            sock.sendall(handshake)
+            resp = sock.recv(68)
+            if len(resp) < 68:
+                logger.error("[模拟连接] 握手失败")
+                error_flag.set()
+                return
+            
+            sock.sendall(struct.pack(">IB", 1, 2))
+            downloaded_bytes = 0
+            last_time = time.time()
+            
+            while not stop_event.is_set():
+                payload = struct.pack(">IBIII", 13, 6, 0, 0, 16384)
+                sock.sendall(payload)
+                sock.settimeout(5)
+                try:
+                    data = sock.recv(16384 + 13)
+                    if not data:
+                        logger.error("[模拟连接] Peer 断连")
+                        error_flag.set()
+                        break
+                    downloaded_bytes += len(data)
+                except socket.timeout:
+                    pass
+                
+                now = time.time()
+                if now - last_time >= 1.0:
+                    CURRENT_SIM_SPEED_KB = int((downloaded_bytes / 1024) / (now - last_time))
+                    downloaded_bytes = 0
+                    last_time = now
+    except Exception as e:
+        logger.error(f"[模拟连接] 错误: {e}")
+        error_flag.set()
+
+
+def run_simulation_process(client, t_hash, t_name):
+    global CURRENT_SIM_SPEED_KB
+    try:
+        prefs = client.app_preferences()
+        listen_port = prefs.get('listen_port')
+        peer_addr = f"{QB_HOST}:{listen_port}"
+        logger.info(f"[模拟激活] 任务 {t_name} 已完成。地址: {peer_addr}")
+    except: return
+
+    target_ratio = round(random.uniform(0.5, 2.0), 2)
+    logger.info(f"[模拟激活] 目标分享率: {target_ratio}")
+    
+    stop_event = threading.Event()
+    error_flag = threading.Event()
+    sim_thread = threading.Thread(target=connect_peer_with_stop_py, args=(peer_addr, t_hash, stop_event, error_flag))
+    sim_thread.daemon = True
+    sim_thread.start()
+    
+    last_log_time = time.time()
+    try:
+        while True:
+            if error_flag.is_set(): break
+            try:
+                t_list = client.torrents_info(torrent_hashes=t_hash)
+                if not t_list: break
+                current_ratio = t_list[0].ratio
+            except: break
+            
+            if time.time() - last_log_time >= 30:
+                logger.info(f"[模拟运行中] 速度: {CURRENT_SIM_SPEED_KB}KB/s, 分享率: {current_ratio:.3f}/{target_ratio}")
+                last_log_time = time.time()
+                
+            if current_ratio >= target_ratio:
+                logger.info(f"[模拟完成] 达到分享率: {current_ratio:.3f}")
+                break
+            time.sleep(5)
+    finally:
+        stop_event.set()
+        sim_thread.join(timeout=5)
+        CURRENT_SIM_SPEED_KB = 0
+
 # ==========================================
 # 主逻辑循环
 # ==========================================
 
 def main():
     global KICKSTART_MULTIPLIER
-    logger.info("脚本服务 v4.13 已启动 (支持 Keep 目录/标签，两阶段扫描逻辑)...")
+    logger.info("脚本服务 v5.1 已启动 (支持 Keep 目录/标签，两阶段扫描逻辑，模拟连接流程)...")
     Path(TORRENT_LIB_PATH).mkdir(parents=True, exist_ok=True)
     Path(TORRENT_KEEP_PATH).mkdir(parents=True, exist_ok=True)
     client, disk_full_start_time = None, None
@@ -424,11 +539,19 @@ def main():
             if client is None:
                 client = get_qb_client()
                 check_and_update_active_download(client)
+            
+            #castle 获取当前正在下载的任务列表，当前搞一个空的
+            castle_dling_hash = None
 
             # --- 步骤 1: 下载状态监控 ---
             while has_unfinished_downloads(client):
                 check_and_update_active_download(client)
                 if check_for_timeout_and_delete(client): continue
+
+                #肯定不为空，为模拟连接做准备
+                tt_list = client.torrents_info(filter='downloading')
+                castle_dling_hash = tt_list[0].hash
+
                 
                 try:
                     downloading = client.torrents_info(filter='downloading')
@@ -457,6 +580,18 @@ def main():
                                     f"[ETA: {eta_display}] {timeout_info}")
                 except Exception: pass
                 time.sleep(WAIT_DOWNLOAD_CHECK)
+
+            if castle_dling_hash:    #caslte模拟连接测试代码块
+                t_list = client.torrents_info(torrent_hashes=castle_dling_hash)
+                t = t_list[0]
+                if t and t.state in ['uploading', 'stalledUP', 'queuedUP', 'forcedUP']:
+                    logger.info(f"castle dump 当前下载完成的任务: {t.hash} | {t.name}")
+                    run_simulation_process(client, castle_dling_hash, t.name)
+                else:
+                    logger.info(f"castle dump 之前在下载但此刻已经被删除或非做种：{t.hash} | {t.name}")
+            else:
+                logger.info(f"castle dump 没有下载完成的任务")
+
 
             # --- 步骤 2: 做种保护 ---
             while True:
