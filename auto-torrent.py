@@ -36,6 +36,7 @@ QB_PASSWORD = 'zxcvbnm123'
 # 路径配置
 TORRENT_LIB_PATH = './torrent-lib'
 TORRENT_KEEP_PATH = './torrent-keep'  # v4.13 新增: 保种任务目录
+TORRENT_UPLOAD_PATH = './torrent-upload' # 新增: 模拟上传目录
 QB_SAVE_PATH = '/downloads' 
 LOCAL_PATH = '.' 
 
@@ -45,9 +46,10 @@ DISK_RESERVE_GB = 2.0
 # 任务标签
 TORRENT_TAG = 'auto-add'
 KEEP_TAG = 'keep'  # v4.13 新增: 保种标签
+UPLOAD_TAG = 'upload-sim' # 新增: 模拟上传标签
 
 # 日志文件名 (已更新到 v4.13)
-LOG_FILENAME = 'auto-torrent-v5.1.log'
+LOG_FILENAME = 'auto-torrent-v5.0.log'
 
 # --- Tracker 优先级配置 ---
 TRACKER_PRIORITY_LIST = [
@@ -89,6 +91,8 @@ EARLY_CHECK_POINTS = [
 # --- Kickstart 批量配置 ---
 KICKSTART_BATCH_SIZE = 10
 
+SIMULATIO_ONOFF = True
+
 # ==========================================
 # 全局状态
 # ==========================================
@@ -99,7 +103,8 @@ ACTIVE_DOWNLOAD_TRACKER = {
     'name': None, 
     'timeout_seconds': 0.0, 
     'checked_points': set(),
-    'is_keep': False  # v4.13 新增: 是否为保种任务
+    'is_keep': False,  # v4.13 新增: 是否为保种任务
+	'is_upload_sim': False # 新增标识
 }
 
 KICKSTART_MULTIPLIER = 0
@@ -221,8 +226,8 @@ def measure_average_upload_speed(client, duration=30):
 def cleanup_files():
     target_dir = Path(LOCAL_PATH).absolute()
     whitelist_extensions = ['.py', '.sh', '.log', '.go']
-    whitelist_dirs = ['torrent-lib', 'torrent-keep', '.git', '__pycache__']
-    whitelist_files = [LOG_FILENAME, 'auto-torrent-v4.13.py'] 
+    whitelist_dirs = ['torrent-lib', 'torrent-keep', 'torrent-upload', '.git', '__pycache__']
+    whitelist_files = [LOG_FILENAME] 
     
     if not target_dir.exists(): return
     for item in target_dir.iterdir():
@@ -230,8 +235,12 @@ def cleanup_files():
             if item.is_dir() and item.name in whitelist_dirs: continue
             if item.is_file() and (item.suffix in whitelist_extensions or item.name in whitelist_files): continue
             if item.is_file() and item.name.endswith(('.torrent.slow', '.torrent.dead')): continue
-            if item.is_file() or item.is_symlink(): os.remove(item)
-            elif item.is_dir(): shutil.rmtree(item)
+            if item.is_file() or item.is_symlink():
+                logger.info(f"[清理] 正在删除文件: {item.name}")
+                os.remove(item)
+            elif item.is_dir():
+                logger.info(f"[清理] 正在删除文件夹: {item.name}")
+                shutil.rmtree(item)
         except Exception: pass
 
 def check_disk_space(required_bytes):
@@ -262,8 +271,8 @@ def cleanup_slow_torrent(client, t_hash, t_name, is_dead=False):
         logger.info(f"已删除{log_label}: {t_name}")
     except Exception: pass
         
-    # v4.13: 扫描两个目录
-    for lib_dir in [TORRENT_LIB_PATH, TORRENT_KEEP_PATH]:
+    # v4.13: 扫描所有可能目录
+    for lib_dir in [TORRENT_LIB_PATH, TORRENT_KEEP_PATH, TORRENT_UPLOAD_PATH]:
         lib_path = Path(lib_dir)
         if not lib_path.exists(): continue
         for t_file in lib_path.glob('*.torrent'):
@@ -297,16 +306,25 @@ def format_seconds_to_ddhhmm(seconds):
         return f"{d:02d}d{h:02d}h{m:02d}m"
     return f"{h:02d}h{m:02d}m{s:02d}s"
 
+# --- 修复 missing function 错误 ---
+def get_dynamic_timeout(size_bytes):
+    """根据文件大小计算动态超时时间(秒)"""
+    size_gb = size_bytes / (1024**3)
+    # 按照配置的每小时下载量计算，最小给 10GB 的保底时长
+    timeout_seconds = (max(size_gb, 10.0) / TIMEOUT_GB_PER_HOUR) * 3600
+    return int(timeout_seconds)
+
 def check_and_update_active_download(client):
     global ACTIVE_DOWNLOAD_TRACKER
     try:
-        # 扫描所有带 auto-add 或 keep 标签的任务
+        # 扫描所有带 auto-add, keep 或 upload-sim 标签的任务
         downloading = client.torrents_info(filter='downloading')
         # 优先选取当前正在跟踪的 hash，如果没有则选第一个符合标签的
         target_task = None
+        valid_tags = {TORRENT_TAG, KEEP_TAG, UPLOAD_TAG}
         for t in downloading:
-            tags = t.tags.split(', ') if t.tags else []
-            if TORRENT_TAG in tags or KEEP_TAG in tags:
+            tags = set(t.tags.split(', ')) if t.tags else set()
+            if valid_tags.intersection(tags):
                 target_task = t
                 break
         
@@ -315,7 +333,9 @@ def check_and_update_active_download(client):
             if current_hash == ACTIVE_DOWNLOAD_TRACKER['hash']: return
             t_info = target_task
             size_gb = t_info.total_size / (1024**3)
-            is_keep = KEEP_TAG in (t_info.tags.split(', ') if t_info.tags else [])
+            tags_list = t_info.tags.split(', ') if t_info.tags else []
+            is_keep = KEEP_TAG in tags_list
+            is_upload_sim = UPLOAD_TAG in tags_list
             
             # v4.13: Keep 任务不设置动态超时逻辑，此处仅为日志占位
             timeout_seconds = (max(size_gb, 10.0) / TIMEOUT_GB_PER_HOUR) * 3600 if not is_keep else 0.0
@@ -323,12 +343,13 @@ def check_and_update_active_download(client):
             ACTIVE_DOWNLOAD_TRACKER = {
                 'hash': current_hash, 'start_time': t_info.added_on if t_info.added_on > 0 else time.time(),
                 'name': t_info.name, 'timeout_seconds': timeout_seconds, 'checked_points': set(),
-                'is_keep': is_keep
+                'is_keep': is_keep,
+                'is_upload_sim': is_upload_sim
             }
             timeout_log = format_seconds_to_ddhhmm(timeout_seconds) if not is_keep else "无限制 (Keep)"
             logger.info(f"开始跟踪新任务: {t_info.name[:30]}... 超时设定: {timeout_log}")
         else:
-            ACTIVE_DOWNLOAD_TRACKER = {'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0, 'checked_points': set(), 'is_keep': False}
+            ACTIVE_DOWNLOAD_TRACKER = {'hash': None, 'start_time': None, 'name': None, 'timeout_seconds': 0.0, 'checked_points': set(), 'is_keep': False, 'is_upload_sim': False}
     except Exception: pass
 
 def check_for_timeout_and_delete(client):
@@ -367,10 +388,12 @@ def check_for_timeout_and_delete(client):
                 if time_pct not in ACTIVE_DOWNLOAD_TRACKER['checked_points']:
                     if elapsed > (ACTIVE_DOWNLOAD_TRACKER['timeout_seconds'] * time_pct):
                         if t.progress < progress_min:
-                            logger.warning(f"触发淘汰: 运行 {time_pct*100:.0f}% 时间但进度仅 {t.progress*100:.1f}%")
+                            logger.warning(f"检查点拦截: 运行 {time_pct*100:.0f}% 时间但进度仅 {t.progress*100:.1f}% 最小要求 {progress_min*100:.1f}%")
                             cleanup_slow_torrent(client, t.hash, t.name)
                             ACTIVE_DOWNLOAD_TRACKER['hash'] = None
                             return True
+                        else:
+                            logger.warning(f"检查点通过: 运行 {time_pct*100:.0f}% 时间，进度为 {t.progress*100:.1f}% 最小要求 {progress_min*100:.1f}%")
                         ACTIVE_DOWNLOAD_TRACKER['checked_points'].add(time_pct)
     except Exception: pass
     return False
@@ -379,12 +402,13 @@ def kickstart_seeding_tasks(client):
     global KICKSTART_MULTIPLIER
     logger.warning(f"触发 Kickstart 分段滚动重置 (起始偏移: {KICKSTART_MULTIPLIER * KICKSTART_BATCH_SIZE})")
     try:
-        # 获取所有已完成的 auto-add 或 keep 任务
+        # 获取所有已完成的任务
         completed = [t for t in client.torrents_info() if t.progress >= 1.0]
         valid_completed = []
+        valid_tags = {TORRENT_TAG, KEEP_TAG, UPLOAD_TAG}
         for t in completed:
-            ts = t.tags.split(', ') if t.tags else []
-            if TORRENT_TAG in ts or KEEP_TAG in ts:
+            ts = set(t.tags.split(', ')) if t.tags else set()
+            if valid_tags.intersection(ts):
                 valid_completed.append(t)
         
         if not valid_completed: 
@@ -410,6 +434,7 @@ def kickstart_seeding_tasks(client):
         client.torrents_pause(torrent_hashes=hashes)
         time.sleep(10)
         client.torrents_resume(torrent_hashes=hashes)
+        time.sleep(10)
         client.torrents_reannounce(torrent_hashes=hashes)
         KICKSTART_MULTIPLIER += 1
     except Exception as e:
@@ -488,10 +513,10 @@ def run_simulation_process(client, t_hash, t_name):
         prefs = client.app_preferences()
         listen_port = prefs.get('listen_port')
         peer_addr = f"{QB_HOST}:{listen_port}"
-        logger.info(f"[模拟激活] 任务 {t_name} 已完成。地址: {peer_addr}")
+        logger.info(f"[模拟激活] 任务{t_name} 已完成。地址: {peer_addr}")
     except: return
 
-    target_ratio = round(random.uniform(0.5, 2.0), 2)
+    target_ratio = round(random.uniform(0.5, 2.5), 2)
     logger.info(f"[模拟激活] 目标分享率: {target_ratio}")
     
     stop_event = threading.Event()
@@ -501,6 +526,7 @@ def run_simulation_process(client, t_hash, t_name):
     sim_thread.start()
     
     last_log_time = time.time()
+    zero_speed_count = 0  # 新增: 零速采样计数器
     try:
         while True:
             if error_flag.is_set(): break
@@ -510,14 +536,25 @@ def run_simulation_process(client, t_hash, t_name):
                 current_ratio = t_list[0].ratio
             except: break
             
+            # 检测连续 3 次采样速度为 0
+            if CURRENT_SIM_SPEED_KB <= 0.0:
+                zero_speed_count += 1
+            else:
+                zero_speed_count = 0
+            
+            if zero_speed_count >= 3:
+                logger.warning(f"[模拟终止] 连续 3 次检测到 0.0KB/s 速度，自动终止流程。")
+                break
+
             if time.time() - last_log_time >= 30:
                 logger.info(f"[模拟运行中] 速度: {CURRENT_SIM_SPEED_KB}KB/s, 分享率: {current_ratio:.3f}/{target_ratio}")
                 last_log_time = time.time()
                 
             if current_ratio >= target_ratio:
                 logger.info(f"[模拟完成] 达到分享率: {current_ratio:.3f}")
+                time.sleep(120)#模拟连接的速度会缓慢下降，防止后面高速上传的误判断
                 break
-            time.sleep(5)
+            time.sleep(10)
     finally:
         stop_event.set()
         sim_thread.join(timeout=5)
@@ -529,9 +566,10 @@ def run_simulation_process(client, t_hash, t_name):
 
 def main():
     global KICKSTART_MULTIPLIER
-    logger.info("脚本服务 v5.1 已启动 (支持 Keep 目录/标签，两阶段扫描逻辑，模拟连接流程)...")
+    logger.info("脚本服务 v5.0 已启动 (支持 Upload/Keep/Lib 目录，多级扫描逻辑)...")
     Path(TORRENT_LIB_PATH).mkdir(parents=True, exist_ok=True)
     Path(TORRENT_KEEP_PATH).mkdir(parents=True, exist_ok=True)
+    Path(TORRENT_UPLOAD_PATH).mkdir(parents=True, exist_ok=True) # 新增目录创建
     client, disk_full_start_time = None, None
 
     while True:
@@ -558,7 +596,7 @@ def main():
                     t = None
                     for task in downloading:
                         ts = task.tags.split(', ') if task.tags else []
-                        if TORRENT_TAG in ts or KEEP_TAG in ts:
+                        if TORRENT_TAG in ts or KEEP_TAG in ts or UPLOAD_TAG in ts:
                             t = task
                             break
                     
@@ -574,23 +612,53 @@ def main():
                         
                         count_lib = count_unadded_torrents(client, TORRENT_LIB_PATH)
                         count_keep = count_unadded_torrents(client, TORRENT_KEEP_PATH)
+                        count_upload = count_unadded_torrents(client, TORRENT_UPLOAD_PATH)
                         
-                        logger.info(f"下载中... [Lib:{count_lib}/Keep:{count_keep}] "
-                                    f"[进度: {t.progress*100:.2f}%] [耗时: {format_seconds_to_ddhhmm(elapsed_seconds)}] "
-                                    f"[ETA: {eta_display}] {timeout_info}")
+                        logger.info(f"下载中... [L:{count_lib}/K:{count_keep}/U:{count_upload}] "
+                                    f"[进度:{t.progress*100:.2f}%] [耗时:{format_seconds_to_ddhhmm(elapsed_seconds)}] "
+                                    f"[ETA:{eta_display}] {timeout_info}")
                 except Exception: pass
                 time.sleep(WAIT_DOWNLOAD_CHECK)
+            
+            time.sleep(10)#delay 10s
 
-            if castle_dling_hash:    #caslte模拟连接测试代码块
-                t_list = client.torrents_info(torrent_hashes=castle_dling_hash)
-                t = t_list[0]
-                if t and t.state in ['uploading', 'stalledUP', 'queuedUP', 'forcedUP']:
-                    logger.info(f"castle dump 当前下载完成的任务: {t.hash} | {t.name}")
-                    run_simulation_process(client, castle_dling_hash, t.name)
+            # if SIMULATIO_ONOFF and castle_dling_hash and ACTIVE_DOWNLOAD_TRACKER['is_upload_sim']:    #caslte模拟连接测试代码块
+            #     t_list = client.torrents_info(torrent_hashes=castle_dling_hash)
+            #     t = t_list[0]
+            #     if t and t.state in ['uploading', 'stalledUP', 'queuedUP', 'forcedUP']:
+            #         logger.info(f"当前下载完成的任务: {t.hash} | {t.name}")
+            #         run_simulation_process(client, castle_dling_hash, t.name)
+            #     else:
+            #         logger.info(f"之前在下载但此刻已经被删除或非做种：{t.hash} | {t.name}")
+            # else:
+            #     logger.info(f"任务下载完成，或超时：{ACTIVE_DOWNLOAD_TRACKER['name']}")
+
+
+            # 筛选出状态为做种中（uploading）或相关做种状态的任务
+            # 状态过滤参考：'uploading', 'stalledUP', 'queuedUP', 'forcedUP'
+            all_torrents = client.torrents_info(filter='seeding')
+
+            if all_torrents:
+                # 根据完成时间 (completion_on) 进行降序排序，最新的排在最前面
+                # completion_on 是 Unix 时间戳
+                t_list = sorted(all_torrents, key=lambda t: t.completion_on, reverse=True)
+                
+                # 此时 t_list[0] 即为最新完成并正在做种的任务
+                latest_task = t_list[0]
+                # 获取该任务的标签列表
+                # qbt 返回的 tags 通常是 "tag1, tag2" 格式的字符串
+                task_tags = [tag.strip() for tag in latest_task.tags.split(',')] if latest_task.tags else []
+                time_diff_ok = (time.time() - latest_task.completion_on) < 600
+
+                if latest_task and latest_task.state in ['uploading', 'stalledUP', 'queuedUP', 'forcedUP'] and "upload-sim" in task_tags and time_diff_ok:
+                    print(f"最新完成的任务: {latest_task.name} | 完成时间: {latest_task.completion_on}")
+                    run_simulation_process(client, latest_task.hash, latest_task.name)
                 else:
-                    logger.info(f"castle dump 之前在下载但此刻已经被删除或非做种：{t.hash} | {t.name}")
+                    t_list = []
+                    print("当前没有正在做种的任务1，或做种任务太旧")
             else:
-                logger.info(f"castle dump 没有下载完成的任务")
+                t_list = []
+                print("当前没有正在做种的任务2")
 
 
             # --- 步骤 2: 做种保护 ---
@@ -609,10 +677,17 @@ def main():
                 remote_hashes = {t.hash.lower() for t in client.torrents_info()}
                 
                 # v4.13: 决定当前扫描的目录和标签
-                lib_torrents_count = count_unadded_torrents(client, TORRENT_LIB_PATH)
-                if lib_torrents_count > 0:
+                lib_torrents_count_lib = count_unadded_torrents(client, TORRENT_LIB_PATH)
+                lib_torrents_count_upload = count_unadded_torrents(client, TORRENT_UPLOAD_PATH)
+                lib_torrents_count_keep = count_unadded_torrents(client, TORRENT_KEEP_PATH)
+                # logger.info(f"unadded: {lib_torrents_count_lib}, {lib_torrents_count_upload}, {lib_torrents_count_keep}")
+                if lib_torrents_count_lib > 0:
                     current_scan_path = TORRENT_LIB_PATH
                     current_add_tag = TORRENT_TAG
+                    is_scanning_keep = False
+                elif lib_torrents_count_upload > 0:
+                    current_scan_path = TORRENT_UPLOAD_PATH
+                    current_add_tag = UPLOAD_TAG
                     is_scanning_keep = False
                 else:
                     current_scan_path = TORRENT_KEEP_PATH
@@ -633,7 +708,7 @@ def main():
                         })
 
                 if not all_candidates:
-                    logger.info(f"无新种子(Lib/Keep均空)，等待 {WAIT_NO_TORRENT} 秒...")
+                    logger.info(f"无新种子(Lib/Keep/upload均空)，等待 {WAIT_NO_TORRENT} 秒...")
                     disk_full_start_time = None
                     KICKSTART_MULTIPLIER = 0 
                     time.sleep(WAIT_NO_TORRENT)
@@ -656,7 +731,20 @@ def main():
                 if selected_candidate:
                     disk_full_start_time = None
                     KICKSTART_MULTIPLIER = 0 
-                    logger.info(f"添加{'[Keep]' if is_scanning_keep else '[Lib]'}种子: {selected_candidate['path'].name} ({selected_candidate['size']/(1024**3):.2f} GB)")
+
+                    # --- 新增：计算最低所需平均下载速度 ---
+                    required_duration = get_dynamic_timeout(selected_candidate['size'])
+                    # 速度 = 大小(KB) / 时间(秒)
+                    min_required_speed_kb = (selected_candidate['size'] / 1024) / required_duration
+                    if min_required_speed_kb >= 1024:
+                        speed_display = f"{min_required_speed_kb / 1024:.2f} MB/s"
+                    else:
+                        speed_display = f"{min_required_speed_kb:.1f} KB/s"
+
+                    logger.info(f"添加{current_add_tag}种子: {selected_candidate['path'].name} ({selected_candidate['size']/(1024**3):.2f} GB)")
+
+                    logger.info(f"预期下载限时: {required_duration}秒, 需达到平均下载速度: {speed_display} 才能准时完成")
+
                     try:
                         with open(selected_candidate['path'], 'rb') as f:
                             client.torrents_add(torrent_files=f, save_path=QB_SAVE_PATH, tags=current_add_tag)
@@ -669,7 +757,7 @@ def main():
                     avg_speed = measure_average_upload_speed(client, duration=UPLOAD_SAMPLE_DURATION)
                     if avg_speed > UPLOAD_SPEED_THRESHOLD_KB:
                         disk_full_start_time = None 
-                        logger.info(f"磁盘不足，上传中，等待...")
+                        logger.info(f"磁盘不足，但高速上传中 ({avg_speed:.1f} KB/s)，继续做种...")
                         time.sleep(WAIT_UPLOAD_CHECK)
                     else:
                         if disk_full_start_time is None: disk_full_start_time = time.time()
