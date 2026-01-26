@@ -8,7 +8,7 @@ import sys
 ANNOUNCE_URL = "https://tracker.qingwapt.com/announce.php"
 
 # 参数 2: 需要做种的完整目录路径 (末尾不要带斜杠)
-TARGET_DIR = "/home/pt_main/baobao/凯叔三国演义"
+TARGET_DIR = "/home/pt_main/baobao/凯叔西游记"
 # ===========================================
 
 def get_dir_size(path):
@@ -54,7 +54,12 @@ def main():
     # 1. 准备路径和文件名
     parent_dir = os.path.dirname(TARGET_DIR)
     folder_name = os.path.basename(TARGET_DIR)
+    
+    # 最终路径
     torrent_path = os.path.join(parent_dir, f"{folder_name}.torrent")
+    # 临时路径
+    tmp_torrent_path = os.path.join(parent_dir, f"{folder_name}.torrent.tmp")
+    
     nfo_path = os.path.join(parent_dir, f"{folder_name}.nfo")
     log_path = os.path.join(parent_dir, "mktorrent_execution.log")
 
@@ -73,9 +78,12 @@ def main():
     
     if video_file:
         # 使用 mediainfo -f 生成完整报告
-        with open(nfo_path, "w") as nfo_f:
-            subprocess.run(["mediainfo", "-f", video_file], stdout=nfo_f)
-        print(f"成功: NFO 已生成至 {nfo_path}")
+        try:
+            with open(nfo_path, "w") as nfo_f:
+                subprocess.run(["mediainfo", "-f", video_file], stdout=nfo_f)
+            print(f"成功: NFO 已生成至 {nfo_path}")
+        except Exception as e:
+            print(f"生成 NFO 失败: {e}")
     else:
         print("警告: 未在目录中找到视频文件，跳过 NFO 生成。")
 
@@ -84,28 +92,38 @@ def main():
     total_bytes = get_dir_size(TARGET_DIR)
     piece_l = get_optimal_piece_size(total_bytes)
     
-    # 构建 mktorrent 命令
-    # -v: 详细, -p: 私有, -l: 分块, -a: tracker, -o: 输出, 最后是源路径
+    # 构建 mktorrent 命令，先输出到 .tmp 文件
     mk_cmd = [
         "mktorrent", 
         "-v", 
         "-p", 
         "-l", str(piece_l), 
         "-a", ANNOUNCE_URL, 
-        "-o", torrent_path, 
+        "-o", tmp_torrent_path, 
         TARGET_DIR
     ]
     
     ret = run_command(mk_cmd, log_path)
     
     if ret == 0:
-        print(f"\n[3/3] 制作完成！")
-        print(f"种子文件: {torrent_path}")
-        print(f"NFO 文件: {nfo_path}")
-        print(f"执行日志: {log_path}")
-        print(f"\n提示: 请将 .torrent 和 .nfo 下载到本地上传至 PT 站。")
+        # 4. 命令成功执行后，将 .tmp 重命名为 .torrent
+        try:
+            if os.path.exists(torrent_path):
+                os.remove(torrent_path) # 如果已存在旧种子则删除
+            os.rename(tmp_torrent_path, torrent_path)
+            
+            print(f"\n[3/3] 制作完成！")
+            print(f"种子文件: {torrent_path}")
+            print(f"NFO 文件: {nfo_path}")
+            print(f"执行日志: {log_path}")
+            print(f"\n提示: 请将 .torrent 和 .nfo 下载到本地上传至 PT 站。")
+        except Exception as e:
+            print(f"\n[!] 重命名临时文件失败: {e}")
     else:
         print(f"\n[!] 制作失败，请查看日志: {log_path}")
+        if os.path.exists(tmp_torrent_path):
+            print(f"清理临时文件: {tmp_torrent_path}")
+            os.remove(tmp_torrent_path)
 
 if __name__ == "__main__":
     main()
