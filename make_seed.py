@@ -5,6 +5,9 @@ import sys
 import re
 import shutil
 import json
+
+from pathlib import Path
+
 from urllib import request, parse
 # 尝试导入 requests，如果没有则提示安装
 try:
@@ -201,6 +204,150 @@ def capture_screenshots(video_file, output_dir, folder_name, count=4):
             
     return upload_urls
 
+def capture_tile_screenshot(video_file, output_dir, folder_name):
+    """
+    生成九宫格截图 (3x3)，并在左上角添加视频元数据信息。
+    参数: video_file (视频路径), output_dir (输出目录), folder_name (文件夹名用于命名)
+    """
+    duration = get_video_duration(video_file)
+    if duration <= 0:
+        print(f"错误: 无法获取时长，无法生成九宫格。")
+        return None
+
+    # 获取视频元数据
+    try:
+        cmd_meta = [
+            "ffprobe", "-v", "error", "-select_streams", "v:0", 
+            "-show_entries", "stream=width,height,codec_name", 
+            "-of", "json", video_file
+        ]
+        meta_res = subprocess.run(cmd_meta, capture_output=True, text=True)
+        v_info = json.loads(meta_res.stdout)['streams'][0]
+        
+        cmd_audio = [
+            "ffprobe", "-v", "error", "-select_streams", "a:0", 
+            "-show_entries", "stream=codec_name", 
+            "-of", "json", video_file
+        ]
+        audio_res = subprocess.run(cmd_audio, capture_output=True, text=True)
+        a_info = json.loads(audio_res.stdout)['streams'][0] if 'streams' in json.loads(audio_res.stdout) else {'codec_name': 'N/A'}
+
+        file_label = os.path.basename(video_file)
+        v_codec = v_info.get('codec_name', 'unknown')
+        res = f"{v_info.get('width')}x{v_info.get('height')}"
+        a_codec = a_info.get('codec_name', 'unknown')
+        
+        info_text = f"File: {file_label}\\nVideo: {v_codec} | Resolution: {res}\\nAudio: {a_codec}"
+    except Exception:
+        info_text = f"File: {folder_name}"
+
+    out_name = f"{folder_name}_thumb_9x.jpg"
+    out_path = os.path.join(output_dir, out_name)
+    
+    # 计算9个均匀分布的时间点
+    start_offset = duration * 0.05
+    end_offset = duration * 0.95
+    usable_duration = end_offset - start_offset
+    interval = usable_duration / 8
+    
+    timestamps = [start_offset + i * interval for i in range(9)]
+    
+    # 创建临时目录存放单张截图
+    import tempfile
+    temp_dir = tempfile.mkdtemp()
+    temp_files = []
+    
+    print(f"正在生成九宫格预览图: {out_name}...")
+    
+    # 逐个截取关键帧
+    for idx, ts in enumerate(timestamps):
+        temp_file = os.path.join(temp_dir, f"tile_{idx}.jpg")
+        temp_files.append(temp_file)
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(ts),
+            "-i", video_file,
+            "-vframes", "1",
+            "-vf", "scale=640:-1",
+            "-qscale:v", str(SCREENSHOT_QUALITY),
+            temp_file
+        ]
+        
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode != 0:
+            print(f"  警告: 截图 {idx} 失败")
+    
+    # 使用 hstack 和 vstack 组合（兼容旧版本 ffmpeg）
+    # 先横向拼接3行，再纵向拼接
+    filter_complex = (
+        "[0:v][1:v][2:v]hstack=inputs=3[row1];"
+        "[3:v][4:v][5:v]hstack=inputs=3[row2];"
+        "[6:v][7:v][8:v]hstack=inputs=3[row3];"
+        "[row1][row2][row3]vstack=inputs=3[stacked];"
+        f"[stacked]drawtext=text='{info_text}':x=20:y=20:fontsize=24:fontcolor=white:"
+        f"box=1:boxcolor=black@0.6:boxborderw=10"
+    )
+    
+    cmd = ["ffmpeg", "-y"]
+    for temp_file in temp_files:
+        cmd.extend(["-i", temp_file])
+    
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-frames:v", "1",
+        "-qscale:v", str(SCREENSHOT_QUALITY),
+        out_path
+    ])
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print(f"  错误: 合并失败")
+        print(f"  stderr: {result.stderr}")
+    
+    # 清理临时文件
+    import shutil
+    shutil.rmtree(temp_dir)
+    
+    if result.returncode == 0 and os.path.exists(out_path):
+        print(f"  九宫格生成成功: {out_path}")
+        if ENABLE_UPLOAD:
+            print(f"    正在上传九宫格到 Pixhost...")
+            up_url = upload_to_pixhost(out_path)
+            return up_url
+    else:
+        print(f"  九宫格生成失败")
+    
+    return None
+
+def delete_files_by_extension(folder_path: str, extension: str) -> None:
+    """
+    删除指定文件夹下所有特定扩展名的文件（不递归子文件夹）
+    示例：delete_files_by_extension("./output", ".tmp")
+    """
+    # 确保 extension 以 . 开头
+    ext = extension if extension.startswith('.') else '.' + extension
+    
+    folder = Path(folder_path)
+    
+    # 使用生成器表达式 + 统计删除数量
+    deleted_count = 0
+    
+    for file_path in folder.glob(f"*{ext}"):
+        if file_path.is_file():           # 确保是文件而非目录
+            try:
+                file_path.unlink()        # 删除文件
+                deleted_count += 1
+                print(f"已删除: {file_path}")
+            except PermissionError:
+                print(f"权限不足，跳过: {file_path}")
+            except Exception as e:
+                print(f"删除失败 {file_path}: {e}")
+    
+    print(f"\n共删除 {deleted_count} 个 {ext} 文件")
+
+
 def main():
     if not os.path.exists(TARGET_DIR):
         print(f"错误: 目录 {TARGET_DIR} 不存在！")
@@ -209,6 +356,12 @@ def main():
     # 1. 准备路径和文件名
     parent_dir = os.path.dirname(TARGET_DIR)
     folder_name = os.path.basename(TARGET_DIR)
+    print(f"base dir: {parent_dir}")
+    delete_files_by_extension(parent_dir, ".nfo")
+    delete_files_by_extension(parent_dir, ".torrent")
+    delete_files_by_extension(parent_dir, ".log")
+    
+    # return None    
     
     # 最终路径
     torrent_path = os.path.join(parent_dir, f"{folder_name}.torrent")
@@ -226,7 +379,6 @@ def main():
     print(f"目标目录: {TARGET_DIR}")
     
     # 2. 生成 NFO (寻找第一个视频文件)
-    print(f"\n[1/3] 正在生成 NFO 文件...")
     video_file = None
     for root, dirs, files in os.walk(TARGET_DIR):
         for f in files:
@@ -248,20 +400,26 @@ def main():
     else:
         print("警告: 未在目录中找到视频文件，跳过 NFO 生成。")
 
+    # return None
+
     # 2. 截图与上传
     print(f"\n[2/4] 正在处理视频截图与上传...")
+    urls = []
     if video_file:
         if not os.path.exists(screens_dir):
             os.makedirs(screens_dir)
             print(f"创建固定截图目录: {screens_dir}")
         urls = capture_screenshots(video_file, screens_dir, folder_name, count=4)
+        pic9_url = capture_tile_screenshot(video_file, screens_dir, folder_name)
+        if(pic9_url):
+            urls.append(pic9_url)
         if urls:
             with open(url_log_path, "w") as f:
                 f.write("\n".join(urls))
             print(f"所有截图链接已写入: {url_log_path}")
     else:
         print("未找到视频文件，跳过截图步骤。")
-
+  
     # 3. 计算 Piece Size 并制作种子
     print(f"\n[3/4] 正在制作种子文件...")
     total_bytes = get_dir_size(TARGET_DIR)
