@@ -17,10 +17,11 @@ except ImportError:
 # ================= 配置区域 =================
 # 参数 1: 你的 PT 站 Announce URL (Passkey)
 # ANNOUNCE_URL = "https://tracker.qingwapt.com/announce.php"
-ANNOUNCE_URL = "https://rousi.pro/tracker/1d3ba4125577007e0d8c4b1d2527375a/announce"
+# ANNOUNCE_URL = "https://rousi.pro/tracker/1d3ba4125577007e0d8c4b1d2527375a/announce"
+ANNOUNCE_URL = " https://t.ubits.club/announce.php"
 
 # 参数 2: 需要做种的完整目录路径 (末尾不要带斜杠)
-TARGET_DIR = "/home/pt_main/sports/NBA RS 2026 New York Knicks vs Boston Celtics 08 02 1080pEN60fps ESPN on ABC"
+TARGET_DIR = "/home/pt_main/sports/NBA RS 2026 San Antonio Spurs vs Los Angeles Lakers 10 021080p60_FSN-SAS"
 
 # --- 新增功能配置 ---
 # 截图画质 (1-31, 1最好, 31最差, 建议 3-5 保持在 500k 左右)
@@ -100,7 +101,7 @@ def upload_to_pixhost(file_path):
     """
     根据 PiXhost API 手册更新的上传函数
     API Endpoint: https://api.pixhost.to/images
-	根据 PiXhost API 手册上传图片并返回 BBCode 格式字符串
+	根据 PiXhost API 手册上传图片并返回 BBCode 格式字符串(使用原图直连)
     """
     url = "https://api.pixhost.to/images"
     try:
@@ -125,8 +126,13 @@ def upload_to_pixhost(file_path):
             th_url = resp_json.get('th_url')
             
             if show_url and th_url:
-                # 按照用户要求的 [url=...][img]...[/img][/url] 格式生成
-                return f"[url={show_url}][img]{th_url}[/img][/url]"
+                # 转换 th_url 为原图直连直连 img_url
+                # 示例 th_url: https://t2.pixhost.to/thumbs/5653/693689299_image.png
+                # 示例 img_url: https://img2.pixhost.to/images/5653/693689299_image.png
+                img_url = th_url.replace('https://t', 'https://img').replace('/thumbs/', '/images/')
+                
+                # 返回格式: [url=展示页][img]原图直连[/img][/url]
+                return f"[url={show_url}][img]{img_url}[/img][/url]"
             else:
                 print(f"  API 返回字段缺失: {resp_json}")
         else:
