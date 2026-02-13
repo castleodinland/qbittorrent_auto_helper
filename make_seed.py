@@ -18,14 +18,14 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
     import requests
 
+# find . -maxdepth 1 -type d -name "Z-*"
+# find . -maxdepth 1 -type d -name "Z-*" -exec rm -rf {} + 
 
 PRO_VER = "v2.0.0"
 
 # 任务字典：{ "视频目录路径": "中文副标题" }
 TASKS = {
-    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Washington Wizards vs New York Knicks 11 02 720pEN60fps FDSN",
-    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Atlana Hawks vs Charlotte Hornets 11 02 720pEN60fps FDSN",
-    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Oklahoma City Thunder vs Phoenix Suns 11 02 720pEN60fps FDSN",
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Dallas Mavericks vs Los Angeles Lakers 12 02 1080pEN60fps Prime",
 }
 OUTPUT_BASE_DIR = "/home/pt_main/docker_upload_s/nba/"
 
@@ -141,8 +141,8 @@ def translate_nba_info(raw_string):
             return f"Error: Format error (vs/quality) -> {raw_string}"
 
         # 5. 提取日期：画质前面的两个单词分别是 月 和 日
-        month = parts[quality_idx - 2]
-        day = parts[quality_idx - 1]
+        month = parts[quality_idx - 1]
+        day = parts[quality_idx - 2]
         quality = parts[quality_idx]
 
         # 6. 提取队名：
@@ -701,8 +701,6 @@ def main_prosess(TARGET_DIR):
     }
     with open(publish_path, "w", encoding="utf-8") as f:
         json.dump(publish_data, f, ensure_ascii=False, indent=4)
-    
-    
 
 
 if __name__ == "__main__":
