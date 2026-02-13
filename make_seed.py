@@ -24,7 +24,7 @@ except ImportError:
 ANNOUNCE_URL = " https://t.ubits.club/announce.php"
 
 # 参数 2: 需要做种的完整目录路径 (末尾不要带斜杠)
-TARGET_DIR = "/home/pt_main/sports/NBA RS 2026 San Antonio Spurs vs Los Angeles Lakers 10 021080p60_FSN-SAS"
+TARGET_DIR = "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Washington Wizards vs New York Knicks 11 02 720pEN60fps FDSN"
 
 # --- 新增功能配置 ---
 # 截图画质 (1-31, 1最好, 31最差, 建议 3-5 保持在 500k 左右)
@@ -204,9 +204,10 @@ def capture_screenshots(video_file, output_dir, folder_name, count=4):
             
     return upload_urls
 
+
 def capture_tile_screenshot(video_file, output_dir, folder_name):
     """
-    生成九宫格截图 (3x3)，并在左上角添加视频元数据信息。
+    生成九宫格截图 (3x3)，并在顶部白边区域添加详细的视频元数据信息。
     参数: video_file (视频路径), output_dir (输出目录), folder_name (文件夹名用于命名)
     """
     duration = get_video_duration(video_file)
@@ -214,32 +215,92 @@ def capture_tile_screenshot(video_file, output_dir, folder_name):
         print(f"错误: 无法获取时长，无法生成九宫格。")
         return None
 
-    # 获取视频元数据
+    # 使用 ffprobe 获取详细的视频元数据
     try:
-        cmd_meta = [
-            "ffprobe", "-v", "error", "-select_streams", "v:0", 
-            "-show_entries", "stream=width,height,codec_name", 
-            "-of", "json", video_file
+        # 获取视频流信息
+        cmd_video = [
+            "ffprobe", "-v", "error", 
+            "-select_streams", "v:0", 
+            "-show_entries", "stream=width,height,codec_name,bit_rate,r_frame_rate,pix_fmt", 
+            "-show_entries", "format=duration,size,bit_rate,filename",
+            "-of", "json", 
+            video_file
         ]
-        meta_res = subprocess.run(cmd_meta, capture_output=True, text=True)
-        v_info = json.loads(meta_res.stdout)['streams'][0]
+        video_res = subprocess.run(cmd_video, capture_output=True, text=True)
+        video_data = json.loads(video_res.stdout)
         
+        # 获取音频流信息
         cmd_audio = [
-            "ffprobe", "-v", "error", "-select_streams", "a:0", 
-            "-show_entries", "stream=codec_name", 
-            "-of", "json", video_file
+            "ffprobe", "-v", "error", 
+            "-select_streams", "a:0", 
+            "-show_entries", "stream=codec_name,sample_rate,channels,bit_rate", 
+            "-of", "json", 
+            video_file
         ]
         audio_res = subprocess.run(cmd_audio, capture_output=True, text=True)
-        a_info = json.loads(audio_res.stdout)['streams'][0] if 'streams' in json.loads(audio_res.stdout) else {'codec_name': 'N/A'}
-
-        file_label = os.path.basename(video_file)
-        v_codec = v_info.get('codec_name', 'unknown')
-        res = f"{v_info.get('width')}x{v_info.get('height')}"
-        a_codec = a_info.get('codec_name', 'unknown')
+        audio_data = json.loads(audio_res.stdout)
         
-        info_text = f"File: {file_label}\\nVideo: {v_codec} | Resolution: {res}\\nAudio: {a_codec}"
-    except Exception:
-        info_text = f"File: {folder_name}"
+        # 解析数据
+        v_stream = video_data.get('streams', [{}])[0]
+        v_format = video_data.get('format', {})
+        a_stream = audio_data.get('streams', [{}])[0] if audio_data.get('streams') else {}
+        
+        # 文件信息
+        file_name = os.path.basename(video_file)
+        file_size = int(v_format.get('size', 0)) / (1024 * 1024)  # MB
+        
+        # 视频信息
+        v_codec = v_stream.get('codec_name', 'unknown').upper()
+        width = v_stream.get('width', 0)
+        height = v_stream.get('height', 0)
+        resolution = f"{width}x{height}"
+        
+        # 帧率处理
+        fps_str = v_stream.get('r_frame_rate', '0/1')
+        try:
+            num, den = map(int, fps_str.split('/'))
+            fps = round(num / den, 2) if den != 0 else 0
+        except:
+            fps = 0
+        
+        # 视频比特率
+        v_bitrate = int(v_stream.get('bit_rate', 0)) / 1000 if v_stream.get('bit_rate') else 0
+        if v_bitrate == 0:
+            # 如果流中没有比特率，尝试从格式中获取
+            total_bitrate = int(v_format.get('bit_rate', 0)) / 1000
+            v_bitrate = int(total_bitrate) if total_bitrate > 0 else 0
+        
+        # 音频信息
+        a_codec = a_stream.get('codec_name', 'N/A').upper() if a_stream else 'N/A'
+        a_sample_rate = int(a_stream.get('sample_rate', 0)) / 1000 if a_stream.get('sample_rate') else 0
+        a_channels = a_stream.get('channels', 0) if a_stream else 0
+        a_bitrate = int(a_stream.get('bit_rate', 0)) / 1000 if a_stream.get('bit_rate') else 0
+        
+        # 时长格式化
+        duration_str = f"{int(duration // 60)}:{int(duration % 60):02d}"
+        
+        # 构建信息文本（4行）
+        info_lines = [
+            f"File: {file_name}",
+            f"Size: {file_size:.1f} MB | Duration: {duration_str}",
+            f"Video: {v_codec} | {resolution} | {fps} fps | {int(v_bitrate)} kbps",
+            f"Audio: {a_codec} | {a_sample_rate:.1f} kHz | {a_channels} ch | {int(a_bitrate)} kbps"
+        ]
+        
+        print(f"  元数据获取成功:")
+        for line in info_lines:
+            print(f"    {line}")
+        
+    except Exception as e:
+        print(f"  警告: 获取元数据失败: {e}")
+        import traceback
+        traceback.print_exc()
+        info_lines = [
+            f"File: {os.path.basename(video_file)}",
+            "Metadata unavailable",
+            "",
+            ""
+        ]
 
     out_name = f"{folder_name}_thumb_9x.jpg"
     out_path = os.path.join(output_dir, out_name)
@@ -278,15 +339,20 @@ def capture_tile_screenshot(video_file, output_dir, folder_name):
         if result.returncode != 0:
             print(f"  警告: 截图 {idx} 失败")
     
-    # 使用 hstack 和 vstack 组合（兼容旧版本 ffmpeg）
-    # 先横向拼接3行，再纵向拼接
+    # 创建临时文本文件存储信息（避免特殊字符转义问题）
+    text_file = os.path.join(temp_dir, "info.txt")
+    with open(text_file, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(info_lines))
+    
+    # 使用 filter_complex 组合九宫格，并在顶部添加120px白边显示信息
+    # textfile 参数避免了特殊字符转义问题
     filter_complex = (
         "[0:v][1:v][2:v]hstack=inputs=3[row1];"
         "[3:v][4:v][5:v]hstack=inputs=3[row2];"
         "[6:v][7:v][8:v]hstack=inputs=3[row3];"
-        "[row1][row2][row3]vstack=inputs=3[stacked];"
-        f"[stacked]drawtext=text='{info_text}':x=20:y=20:fontsize=24:fontcolor=white:"
-        f"box=1:boxcolor=black@0.6:boxborderw=10"
+        "[row1][row2][row3]vstack=inputs=3[grid];"
+        "[grid]pad=iw:ih+120:0:120:white[padded];"
+        f"[padded]drawtext=textfile='{text_file}':x=20:y=10:fontsize=20:fontcolor=black:line_spacing=8"
     )
     
     cmd = ["ffmpeg", "-y"]
@@ -320,6 +386,9 @@ def capture_tile_screenshot(video_file, output_dir, folder_name):
         print(f"  九宫格生成失败")
     
     return None
+
+
+
 
 def delete_files_by_extension(folder_path: str, extension: str) -> None:
     """
@@ -420,6 +489,8 @@ def main():
     else:
         print("未找到视频文件，跳过截图步骤。")
   
+    # return None
+
     # 3. 计算 Piece Size 并制作种子
     print(f"\n[3/4] 正在制作种子文件...")
     total_bytes = get_dir_size(TARGET_DIR)
