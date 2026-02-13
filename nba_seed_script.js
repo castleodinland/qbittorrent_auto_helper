@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         PT发布全自动填表Pro ubits专用 (JSON输入版)
 // @namespace    http://tampermonkey.net/
-// @version      3.4
+// @version      3.5
 // @description  手动输入或粘贴 make_seed_pro.py 生成的 JSON 数据，一键完成 PT 站发布页面填写
 // @author       Castle
 // @match        http*://*/upload*php*
+// @match        http*://*/edit*php*
 // @grant        none
 // ==/UserScript==
 
@@ -75,6 +76,7 @@
             setElement('input[name="small_descr"]', data.subtitle);
             setElement('textarea[name="technical_info"]', data.mediainfo);
             setElement('#descr', data.description);
+            setElement('input[name="url"]', data.imdb);
 
             //================================================================================================
             // --- 2. 解析逻辑 ---
@@ -82,20 +84,34 @@
             // 分辨率解析
             const infoField = document.querySelector('textarea[name="technical_info"]');
             const nfo = (infoField ? infoField.value : document.querySelector('#technical_info').value);
-            const heightMatch = nfo.match(/Height\s*:\s*(\d+)/);
+            // 1. 优化正则表达式
+            // 增加对全角空格、不可见空格的兼容性，并确保匹配到数字后的单位部分
+            // /Height\s*:\s*([\d\s,]+)(?:\s*pixels)?/i
+            // g 标志可以根据需要决定是否使用，这里针对单次匹配优化
+            const heightMatch = nfo.match(/Height\s*:\s*([\d\s\u00A0,]+)/i);
             const scanMatch = nfo.match(/Scan type\s*:\s*(\w+)/);
 
             let resValue = "";
             if (heightMatch) {
-                const h = parseInt(heightMatch[1]);
+                // 2. 提取并清理数据
+                // [\d\s\u00A0,]+ 匹配数字、普通空格、不换行空格(\u00A0)和逗号
+                // 清理：去掉所有非数字字符（保留纯数字）
+                const rawValue = heightMatch[1].replace(/[^\d]/g, '');
+                const h = parseInt(rawValue, 10);
+
+                // 假设 scanMatch 在代码上下文其他地方定义
+                // 获取扫描类型：Progressive 或 Interlaced
+                const scanMatch = nfo.match(/Scan\s+type\s*:\s*(\w+)/i);
                 const isInterlaced = scanMatch && scanMatch[1].toLowerCase().includes('interlaced');
 
-                if (h >= 4320) resValue = "6"; // 4320p
-                else if (h >= 2160) resValue = "5"; // 2160p
-                else if (h >= 1440) resValue = "7"; // 1440p
-                else if (h >= 1080) resValue = isInterlaced ? "2" : "1"; // 1080i 或 1080p
-                else if (h >= 720) resValue = "3"; // 720p
-                else resValue = "4"; // SD
+                if (!isNaN(h)) {
+                    if (h >= 4320) resValue = "6"; // 4320p
+                    else if (h >= 2160) resValue = "5"; // 2160p
+                    else if (h >= 1440) resValue = "7"; // 1440p
+                    else if (h >= 1080) resValue = isInterlaced ? "2" : "1"; // 1080i 或 1080p
+                    else if (h >= 720) resValue = "3"; // 720p
+                    else resValue = "4"; // SD
+                }
             }
 
             // 视频编码解析
