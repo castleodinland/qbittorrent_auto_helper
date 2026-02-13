@@ -5,7 +5,8 @@ import sys
 import re
 import shutil
 import json
-
+import re
+import datetime
 from pathlib import Path
 
 from urllib import request, parse
@@ -17,6 +18,17 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
     import requests
 
+
+PRO_VER = "v2.0.0"
+
+# 任务字典：{ "视频目录路径": "中文副标题" }
+TASKS = {
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Washington Wizards vs New York Knicks 11 02 720pEN60fps FDSN",
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Atlana Hawks vs Charlotte Hornets 11 02 720pEN60fps FDSN",
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Oklahoma City Thunder vs Phoenix Suns 11 02 720pEN60fps FDSN",
+}
+OUTPUT_BASE_DIR = "/home/pt_main/docker_upload_s/nba/"
+
 # ================= 配置区域 =================
 # 参数 1: 你的 PT 站 Announce URL (Passkey)
 # ANNOUNCE_URL = "https://tracker.qingwapt.com/announce.php"
@@ -24,15 +36,164 @@ except ImportError:
 ANNOUNCE_URL = " https://t.ubits.club/announce.php"
 
 # 参数 2: 需要做种的完整目录路径 (末尾不要带斜杠)
-TARGET_DIR = "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Washington Wizards vs New York Knicks 11 02 720pEN60fps FDSN"
+# TARGET_DIR = "D:\pt_main\group_of_video\HHQuietSheMightHearU"
 
 # --- 新增功能配置 ---
 # 截图画质 (1-31, 1最好, 31最差, 建议 3-5 保持在 500k 左右)
 SCREENSHOT_QUALITY = 3
 
 # 是否启用 Pixhost 上传功能
+# ENABLE_UPLOAD = False
 ENABLE_UPLOAD = True
 # ===========================================
+
+
+# --- 新增球队对战翻译功能 ---
+# ===========================================
+
+def translate_nba_info(raw_string):
+    """
+    将原始 NBA 比赛信息字符串翻译为中文格式。
+    支持大小写不敏感匹配，并能自动适配有无冗余后缀的情况。
+    """
+
+    # --- 1. 配置区域 ---
+    
+    # 比赛类型对照表 (Key 统一小写)
+    event_types = {
+        "rs": "常规赛",
+        "playoff": "季后赛",
+        "all-star": "全明星",
+        "finals": "总决赛",
+        "preseason": "季前赛",
+        "in-season tournament": "季中锦标赛"
+    }
+
+    # 球队名称对照表 (Key 统一小写)
+    team_map = {
+        "atlanta hawks": "亚特兰大老鹰",
+        "boston celtics": "波士顿凯尔特人",
+        "brooklyn nets": "布鲁克林篮网",
+        "charlotte hornets": "夏洛特黄蜂",
+        "chicago bulls": "芝加哥公牛",
+        "cleveland cavaliers": "克利夫兰骑士",
+        "detroit pistons": "底特律活塞",
+        "indiana pacers": "印第安纳步行者",
+        "miami heat": "迈阿密热火",
+        "milwaukee bucks": "密尔沃基雄鹿",
+        "new york knicks": "纽约尼克斯",
+        "orlando magic": "奥兰多魔术",
+        "philadelphia 76ers": "费城76人",
+        "toronto raptors": "多伦多猛龙",
+        "washington wizards": "华盛顿奇才",
+        "dallas mavericks": "达拉斯独行侠",
+        "denver nuggets": "丹佛掘金",
+        "golden state warriors": "金州勇士",
+        "houston rockets": "休斯顿火箭",
+        "los angeles clippers": "洛杉矶快船",
+        "los angeles lakers": "洛杉矶湖人",
+        "memphis grizzlies": "孟菲斯灰熊",
+        "minnesota timberwolves": "明尼苏达森林狼",
+        "new orleans pelicans": "新奥尔良鹈鹕",
+        "oklahoma city thunder": "俄克拉荷马城雷霆",
+        "phoenix suns": "菲尼克斯太阳",
+        "portland trail blazers": "波特兰开拓者",
+        "sacramento kings": "萨克拉门托国王",
+        "san antonio spurs": "圣安东尼奥马刺",
+        "utah jazz": "犹他爵士",
+        
+        "atlana hawks": "亚特兰大老鹰",
+    }
+
+    source_suffix = "英文解说 转自sportscult"
+
+    # --- 2. 解析逻辑 ---
+
+    parts = raw_string.split()
+    if len(parts) < 8:
+        return f"Error: String too short -> {raw_string}"
+
+    # 1. NBA 前缀
+    nba_prefix = parts[0]
+    
+    # 2. 比赛类型 (不区分大小写)
+    event_cn = event_types.get(parts[1].lower(), parts[1])
+    
+    # 3. 年份
+    year = parts[2]
+    
+    # 4. 定位 "vs" 和 "画质" 锚点
+    try:
+        vs_idx = -1
+        for i, p in enumerate(parts):
+            if p.lower() == "vs":
+                vs_idx = i
+                break
+        
+        # 定位画质单词 (包含 p, fps 或以数字开头带 p 的特征)
+        quality_idx = -1
+        for i in range(len(parts)-1, vs_idx, -1):
+            if re.search(r'\d{3,4}p', parts[i].lower()):
+                quality_idx = i
+                break
+        
+        if vs_idx == -1 or quality_idx == -1:
+            return f"Error: Format error (vs/quality) -> {raw_string}"
+
+        # 5. 提取日期：画质前面的两个单词分别是 月 和 日
+        month = parts[quality_idx - 2]
+        day = parts[quality_idx - 1]
+        quality = parts[quality_idx]
+
+        # 6. 提取队名：
+        # 队 A 是在年份 (index 2) 之后到 vs (vs_idx) 之前
+        team_a_raw = " ".join(parts[3:vs_idx])
+        # 队 B 是在 vs 之后到月份 (quality_idx - 2) 之前
+        team_b_raw = " ".join(parts[vs_idx + 1 : quality_idx - 2])
+
+        # 7. 查表 (不区分大小写)
+        team_a_cn = team_map.get(team_a_raw.lower(), team_a_raw)
+        team_b_cn = team_map.get(team_b_raw.lower(), team_b_raw)
+
+        return f"{nba_prefix} {event_cn} {year}-{month}-{day}比赛日 {team_a_cn} vs {team_b_cn} {quality} {source_suffix}"
+
+    except Exception as e:
+        return f"Error: {str(e)} during parsing '{raw_string}'"
+# ===========================================
+
+def write_custom_log(file_path, message, mode='a'):
+    """
+    在指定文件中写入 UTC+8 时间戳和自定义字符串。
+    
+    参数:
+    file_path (str): 目标文件的路径
+    message (str): 想要写入的自定义字符串
+    mode (str): 写入模式，'a' 为追加（默认），'w' 为覆盖
+    """
+    try:
+        # 1. 获取当前 UTC 时间
+        utc_now = datetime.datetime.now(datetime.timezone.utc)
+        
+        # 2. 转换为 UTC+8 (北京时间)
+        # 将之前的 -8 改为 +8
+        utc_plus_8 = utc_now + datetime.timedelta(hours=8)
+        
+        # 3. 格式化时间戳 (例如: 2026-02-12 21:15:30)
+        timestamp = utc_plus_8.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 4. 组合最终写入的内容
+        log_entry = f"[{timestamp} UTC+8] {message}\n"
+        
+        # 5. 执行文件写入
+        # 默认模式 'a' 即为追加写入
+        with open(file_path, mode, encoding='utf-8') as f:
+            f.write(log_entry)
+            
+        print(f"成功写入到: {file_path}")
+        
+    except Exception as e:
+        print(f"发生错误: {e}")
+        
 
 def get_dir_size(path):
     """计算目录总大小 (Bytes)"""
@@ -388,49 +549,39 @@ def capture_tile_screenshot(video_file, output_dir, folder_name):
     return None
 
 
-
-
-def delete_files_by_extension(folder_path: str, extension: str) -> None:
-    """
-    删除指定文件夹下所有特定扩展名的文件（不递归子文件夹）
-    示例：delete_files_by_extension("./output", ".tmp")
-    """
-    # 确保 extension 以 . 开头
-    ext = extension if extension.startswith('.') else '.' + extension
-    
-    folder = Path(folder_path)
-    
-    # 使用生成器表达式 + 统计删除数量
-    deleted_count = 0
-    
-    for file_path in folder.glob(f"*{ext}"):
-        if file_path.is_file():           # 确保是文件而非目录
-            try:
-                file_path.unlink()        # 删除文件
-                deleted_count += 1
-                print(f"已删除: {file_path}")
-            except PermissionError:
-                print(f"权限不足，跳过: {file_path}")
-            except Exception as e:
-                print(f"删除失败 {file_path}: {e}")
-    
-    print(f"\n共删除 {deleted_count} 个 {ext} 文件")
-
-
-def main():
+log_file = ""
+def main_prosess(TARGET_DIR):
     if not os.path.exists(TARGET_DIR):
         print(f"错误: 目录 {TARGET_DIR} 不存在！")
         return
+    
+    target_path = Path(TARGET_DIR)
+    if not target_path.exists():
+        print(f"跳过：路径不存在 {TARGET_DIR}")
+        return
 
     # 1. 准备路径和文件名
-    parent_dir = os.path.dirname(TARGET_DIR)
-    folder_name = os.path.basename(TARGET_DIR)
-    print(f"base dir: {parent_dir}")
-    delete_files_by_extension(parent_dir, ".nfo")
-    delete_files_by_extension(parent_dir, ".torrent")
-    delete_files_by_extension(parent_dir, ".log")
+    # parent_dir = os.path.dirname(TARGET_DIR)
+    # folder_name = os.path.basename(TARGET_DIR)
+
+    folder_name = target_path.name
+    subtitle = translate_nba_info(folder_name)
+    write_custom_log(log_file, subtitle)
     
-    # return None    
+    # parent_dir = Path(OUTPUT_BASE_DIR) / f"Z-{folder_name}"
+    parent_dir = Path(OUTPUT_BASE_DIR) / f"Z-{subtitle}"
+    
+    if os.path.exists(parent_dir):
+        shutil.rmtree(parent_dir)
+        print(f"目录 '{parent_dir}' 已删除。")
+    
+    # 创建新的空目录
+    os.makedirs(parent_dir)  # 使用makedirs以防路径中有多级目录
+    print(f"新的空目录 '{parent_dir}' 已创建。")
+
+    print(f"parent_dir: {parent_dir}")
+    print(f"folder_name: {folder_name}")
+    # return None
     
     # 最终路径
     torrent_path = os.path.join(parent_dir, f"{folder_name}.torrent")
@@ -440,11 +591,11 @@ def main():
     nfo_path = os.path.join(parent_dir, f"{folder_name}.nfo")
     log_path = os.path.join(parent_dir, "mktorrent_execution.log")
     url_log_path = os.path.join(parent_dir, "screenshots_urls.log")
+    publish_path = os.path.join(parent_dir, "publish.json")
     
     # 修改点：固定存放在 parent_dir 下的 screenshots 文件夹
     screens_dir = os.path.join(parent_dir, "screenshots")
-
-    print(f"--- 启动 PT 制作自动化流程 ---")
+    
     print(f"目标目录: {TARGET_DIR}")
     
     # 2. 生成 NFO (寻找第一个视频文件)
@@ -462,7 +613,9 @@ def main():
         # 使用 mediainfo -f 生成完整报告
         try:
             with open(nfo_path, "w") as nfo_f:
-                subprocess.run(["mediainfo", "-f", video_file], stdout=nfo_f)
+                # mi_res = subprocess.run(["mediainfo", "-f", video_file], stdout=nfo_f)
+                mi_res = subprocess.run(["mediainfo", "-f", video_file], capture_output=True, text=True)
+                mediainfo_text = mi_res.stdout
             print(f"成功: NFO 已生成至 {nfo_path}")
         except Exception as e:
             print(f"生成 NFO 失败: {e}")
@@ -474,6 +627,7 @@ def main():
     # 2. 截图与上传
     print(f"\n[2/4] 正在处理视频截图与上传...")
     urls = []
+    bbcode_list = []
     if video_file:
         if not os.path.exists(screens_dir):
             os.makedirs(screens_dir)
@@ -483,6 +637,7 @@ def main():
         if(pic9_url):
             urls.append(pic9_url)
         if urls:
+            bbcode_list = urls
             with open(url_log_path, "w") as f:
                 f.write("\n".join(urls))
             print(f"所有截图链接已写入: {url_log_path}")
@@ -530,5 +685,34 @@ def main():
             print(f"清理临时文件: {tmp_torrent_path}")
             os.remove(tmp_torrent_path)
 
+    bbcode_thanks = f"[quote=castle][color=DarkRed][font=Comic Sans MS][size=6]转自sportscult，感谢原创作者[/size][/font][/color][/quote]\n"
+    bbcode_main_pic = f"[url=https://pixhost.to/show/5653/693689299_b13c7363-09da-4c33-bfd6-0cb93c894a2e.png][img]https://img2.pixhost.to/images/5653/693689299_b13c7363-09da-4c33-bfd6-0cb93c894a2e.png[/img][/url]\n\n"
+    publish_data = {
+        "title": folder_name,
+        "subtitle": subtitle,
+        "mediainfo": mediainfo_text,
+        "description": bbcode_thanks + f"[color=Navy][font=Trebuchet MS][size=4]" + subtitle + "\n\n" + bbcode_main_pic + "\n".join(bbcode_list),
+        "tags": {
+            "cat": "407", # NBA/Sports
+            "codec": "7",
+            "standard": "3",
+            "medium": "4" # WebDL
+        }
+    }
+    with open(publish_path, "w", encoding="utf-8") as f:
+        json.dump(publish_data, f, ensure_ascii=False, indent=4)
+    
+    
+
+
 if __name__ == "__main__":
-    main()
+    print(f"--- 启动 PT 制作自动化流程 {PRO_VER} ---")
+    
+    log_file = os.path.join(OUTPUT_BASE_DIR, "log.txt")
+    write_custom_log(log_file, "Begin to process")
+    
+    if not os.path.exists(OUTPUT_BASE_DIR): os.makedirs(OUTPUT_BASE_DIR)
+    for path in TASKS:
+        main_prosess(path)
+    
+    write_custom_log(log_file, "finish process")

@@ -1,227 +1,291 @@
 // ==UserScript==
-// @name         castle nba做种自动填表助手 (手动触发版)
+// @name         PT发布全自动填表Pro ubits专用 (JSON输入版)
 // @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  在网页右上角显示一个按钮，点击后自动填写表单
+// @version      3.4
+// @description  手动输入或粘贴 make_seed_pro.py 生成的 JSON 数据，一键完成 PT 站发布页面填写
 // @author       Castle
 // @match        http*://*/upload*php*
+// @grant        none
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
     /**
-     * 核心填表逻辑
+     * 辅助函数：设置元素值并触发事件
      */
-    function fillForm() {
-        console.log("按钮被点击，开始执行填表逻辑...");
-
-        // 示例 1: 通过 ID 填写邮箱
-        const myBBCode = `
-[color=DarkRed][font=Comic Sans MS][size=6]转自sportscult，感谢原创作者[/size][/font][/color]
-
-[color=Navy][font=Trebuchet MS][size=4]
-
-[url=https://pixhost.to/show/5653/693689299_b13c7363-09da-4c33-bfd6-0cb93c894a2e.png][img]https://img2.pixhost.to/images/5653/693689299_b13c7363-09da-4c33-bfd6-0cb93c894a2e.png[/img][/url]
-
-`;
-        const emailField = document.querySelector('#descr');
-        if (emailField) {
-            emailField.value = myBBCode;
-            // 触发事件确保前端框架识别
-            emailField.dispatchEvent(new Event('input', { bubbles: true }));
-            console.log("种子描述已填写");
-            emailField.style.border = "2px solid red";
-        } else {
-            console.error("未找到 ID 为 'descr' 的元素");
+    function setElement(selector, value, isSelect = false) {
+        const el = document.querySelector(selector);
+        if (el && value) {
+            el.value = value;
+            el.dispatchEvent(new Event(isSelect ? 'change' : 'input', { bubbles: true }));
+            el.style.border = "2px solid #28a745";
+            el.style.backgroundColor = "#f0fff4";
+            return true;
         }
-
-        // 2. 处理下拉选择框browsecat
-        const selectBoxGara = document.querySelector('#browsecat');
-        if (selectBoxGara) {
-            // 技巧：如果你不知道该填什么值，在 F12 检查里看 <option value="xxx">
-            selectBoxGara.value = '407';
-            selectBoxGara.style.border = "2px solid red";
-            // 关键：触发 change 事件
-            selectBoxGara.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-
-        let selectBox = document.querySelector('select[name="medium_sel[4]"]');
-        if (selectBox) {
-            // 2. 设置值。比如你想选“流媒体(WEB-DL)”，从截图看它的 value 是 "4"
-            selectBox.value = "4";
-
-            // 3. 极其重要：触发 change 事件，让网页知道你改了选项
-            // 使用标准的 Event 构造函数
-            const event = new Event('change', { bubbles: true });
-            selectBox.dispatchEvent(event);
-
-            console.log("成功选中：流媒体(WEB-DL)");
-
-            // 调试小技巧：给选中的框加个红边，一眼就能看到对没对
-            selectBox.style.border = "2px solid red";
-        } else {
-            console.error("未找到指定的下拉框，请检查 name 属性是否完全匹配。当前尝试的选择器是：select[name='medium_sel[4]']");
-        }
-
-        //视频编码
-        selectBox = document.querySelector('select[name="codec_sel[4]"]');
-        if (selectBox) {
-            // 2. 设置值。比如你想选“流媒体(WEB-DL)”，从截图看它的 value 是 "4"
-            selectBox.value = "1";
-
-            // 3. 极其重要：触发 change 事件，让网页知道你改了选项
-            // 使用标准的 Event 构造函数
-            const event = new Event('change', { bubbles: true });
-            selectBox.dispatchEvent(event);
-
-            // 调试小技巧：给选中的框加个红边，一眼就能看到对没对
-            selectBox.style.border = "2px solid red";
-        } else {
-            console.error("未找到指定的下拉框，请检查 name 属性是否完全匹配。当前尝试的选择器是：select[name='medium_sel[4]']");
-        }
-
-        //音频编码
-        selectBox = document.querySelector('select[name="audiocodec_sel[4]"]');
-        if (selectBox) {
-            selectBox.value = "6";
-
-            // 3. 极其重要：触发 change 事件，让网页知道你改了选项
-            // 使用标准的 Event 构造函数
-            const event = new Event('change', { bubbles: true });
-            selectBox.dispatchEvent(event);
-
-            // 调试小技巧：给选中的框加个红边，一眼就能看到对没对
-            selectBox.style.border = "2px solid red";
-        } else {
-            console.error("未找到指定的下拉框，请检查 name 属性是否完全匹配。当前尝试的选择器是：select[name='medium_sel[4]']");
-        }
-
-
-        // --- 核心更新：根据标题自动识别分辨率 ---
-        const nameInput = document.querySelector('#name');
-        let autoStandardValue = null;
-
-        if (nameInput) {
-            const title = nameInput.value;
-            console.log("正在解析标题: ", title);
-            
-            // 定义分辨率与值的对应关系 (基于截图)
-            const resolutionMap = {
-                '4320p': '6',
-                '2160p': '5',
-                '1440p': '7',
-                '1080p': '1',
-                '1080i': '2',
-                '720p': '3',
-                'SD': '4'
-            };
-
-            // 使用正则匹配，忽略大小写
-            const match = title.match(/(4320p|2160p|1440p|1080p|1080i|720p|SD)/i);
-            if (match) {
-                const matchedKey = match[0].toLowerCase();
-                // 转换回Map中对应的标准键名
-                const standardKey = Object.keys(resolutionMap).find(key => key.toLowerCase() === matchedKey);
-                autoStandardValue = resolutionMap[standardKey];
-                console.log(`解析成功：识别到 ${standardKey}，对应值为 ${autoStandardValue}`);
-            } else {
-                autoStandardValue = '3';
-                console.warn("标题中未识别到常见分辨率字段");
-            }
-        }
-
-        //分辨率
-        selectBox = document.querySelector('select[name="standard_sel[4]"]');
-        if (selectBox) {
-            selectBox.value = autoStandardValue;
-
-            // 3. 极其重要：触发 change 事件，让网页知道你改了选项
-            // 使用标准的 Event 构造函数
-            const event = new Event('change', { bubbles: true });
-            selectBox.dispatchEvent(event);
-
-            // 调试小技巧：给选中的框加个红边，一眼就能看到对没对
-            selectBox.style.border = "2px solid red";
-        } else {
-            console.error("未找到指定的下拉框，请检查 name 属性是否完全匹配。当前尝试的选择器是：select[name='medium_sel[4]']");
-        }
-
-
-        //地区
-        selectBox = document.querySelector('select[name="source_sel[4]"]');
-        if (selectBox) {
-            selectBox.value = "4";
-
-            // 3. 极其重要：触发 change 事件，让网页知道你改了选项
-            // 使用标准的 Event 构造函数
-            const event = new Event('change', { bubbles: true });
-            selectBox.dispatchEvent(event);
-
-            // 调试小技巧：给选中的框加个红边，一眼就能看到对没对
-            selectBox.style.border = "2px solid red";
-        } else {
-            console.error("未找到指定的下拉框，请检查 name 属性是否完全匹配。当前尝试的选择器是：select[name='medium_sel[4]']");
-        }
-
-        //制作组
-        selectBox = document.querySelector('select[name="team_sel[4]"]');
-        if (selectBox) {
-            selectBox.value = "5";
-
-            // 3. 极其重要：触发 change 事件，让网页知道你改了选项
-            // 使用标准的 Event 构造函数
-            const event = new Event('change', { bubbles: true });
-            selectBox.dispatchEvent(event);
-
-            // 调试小技巧：给选中的框加个红边，一眼就能看到对没对
-            selectBox.style.border = "2px solid red";
-        } else {
-            console.error("未找到指定的下拉框，请检查 name 属性是否完全匹配。当前尝试的选择器是：select[name='medium_sel[4]']");
-        }
-
+        return false;
     }
 
     /**
-     * 创建浮动按钮 UI
+     * 辅助函数：安全设置下拉框值并触发事件
      */
-    function createDebugButton() {
-        const btn = document.createElement('button');
-        btn.innerHTML = '🚀 自动填表';
+    function setSelectValue(selector, value, label = "") {
+        const select = document.querySelector(selector);
+        if (select && value) {
+            select.value = value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            select.style.border = "2px solid #28a745"; // 填充成功显示绿色
+            console.log(`[自动填充] ${label}: 匹配成功 -> ${value}`);
+            return true;
+        }
+        return false;
+    }
 
-        // 设置按钮样式，使其固定在右上角，不随页面滚动
-        Object.assign(btn.style, {
+    /**
+    * 辅助函数：安全勾选复选框
+    */
+    function setCheckboxChecked(name, label = "") {
+        const checkbox = document.querySelector(`input[type="checkbox"][name="${name}"]`);
+        if (checkbox) {
+            checkbox.checked = true;
+            checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+            // 给父元素或自身加个高亮提示
+            checkbox.style.outline = "2px solid #28a745";
+            console.log(`[自动勾选] ${label} (${name}): 已勾选`);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 核心逻辑：解析 JSON 并填充表单
+     */
+    function fillFormWithJSON(jsonText) {
+        try {
+            if (!jsonText || jsonText.trim() === "") return;
+
+            const data = JSON.parse(jsonText);
+
+            if (!data.mediainfo || !data.title) {
+                alert("解析失败：输入的不是有效的发布 JSON 格式，请核对 Python 脚本输出。");
+                return;
+            }
+
+            // 1. 文本字段填写
+            setElement('input[name="small_descr"]', data.subtitle);
+            setElement('textarea[name="technical_info"]', data.mediainfo);
+            setElement('#descr', data.description);
+
+            //================================================================================================
+            // --- 2. 解析逻辑 ---
+
+            // 分辨率解析
+            const infoField = document.querySelector('textarea[name="technical_info"]');
+            const nfo = (infoField ? infoField.value : document.querySelector('#technical_info').value);
+            const heightMatch = nfo.match(/Height\s*:\s*(\d+)/);
+            const scanMatch = nfo.match(/Scan type\s*:\s*(\w+)/);
+
+            let resValue = "";
+            if (heightMatch) {
+                const h = parseInt(heightMatch[1]);
+                const isInterlaced = scanMatch && scanMatch[1].toLowerCase().includes('interlaced');
+
+                if (h >= 4320) resValue = "6"; // 4320p
+                else if (h >= 2160) resValue = "5"; // 2160p
+                else if (h >= 1440) resValue = "7"; // 1440p
+                else if (h >= 1080) resValue = isInterlaced ? "2" : "1"; // 1080i 或 1080p
+                else if (h >= 720) resValue = "3"; // 720p
+                else resValue = "4"; // SD
+            }
+
+            // 视频编码解析
+            let codecValue = "";
+            if (nfo.match(/Format\s*:\s*HEVC/i) || nfo.match(/Format\s*:\s*H\.265/i)) codecValue = "7";
+            else if (nfo.match(/Format\s*:\s*AVC/i) || nfo.match(/Format\s*:\s*H\.264/i)) codecValue = "1";
+            else if (nfo.match(/Format\s*:\s*VC-1/i)) codecValue = "2";
+            else if (nfo.match(/Format\s*:\s*MPEG-2/i)) codecValue = "4";
+
+            // 音频编码解析
+            let audioValue = "";
+            if (nfo.match(/Format\s*:\s*AAC/i)) audioValue = "6";
+            else if (nfo.match(/Format\s*:\s*AC-3/i) || nfo.match(/Commercial name\s*:\s*Dolby Digital/i)) audioValue = "14";
+            else if (nfo.match(/Format\s*:\s*DTS/i)) {
+                if (nfo.match(/DTS-HD/i)) audioValue = "11";
+                else audioValue = "3";
+            }
+            else if (nfo.match(/Format\s*:\s*FLAC/i)) audioValue = "1";
+            else if (nfo.match(/Format\s*:\s*MP3/i) || nfo.match(/Format\s*:\s*MPEG Audio/i)) audioValue = "4";
+
+            // --- 3. 执行填充 ---
+
+            // 分辨率
+            setSelectValue('select[name="standard_sel[4]"]', resValue, "分辨率");
+            // 视频编码
+            setSelectValue('select[name="codec_sel[4]"]', codecValue, "视频编码");
+            // 音频编码
+            setSelectValue('select[name="audiocodec_sel[4]"]', audioValue, "音频编码");
+
+            //================================================================================================
+
+
+            // 固定项填充
+            setSelectValue('#browsecat', '407', "主分类");
+            setSelectValue('select[name="medium_sel[4]"]', '4', "媒介");
+            setSelectValue('select[name="source_sel[4]"]', '4', "地区");
+            setSelectValue('select[name="team_sel[4]"]', '5', "制作组");
+
+            // --- 新增：自动勾选复选框 ---
+            setCheckboxChecked('asoffer', '符合悬赏/匿名');
+            setCheckboxChecked('uplver', '发布者宣誓/确认');
+
+            console.log("JSON 数据已成功填充到表单。");
+        } catch (e) {
+            console.error("解析 JSON 出错:", e);
+            alert("JSON 格式错误，请确保复制了完整的内容！\n错误详情：" + e.message);
+        }
+    }
+
+    /**
+     * 弹出输入对话框
+     */
+    function showInputDialogOld() {
+        const jsonInput = prompt("请粘贴 Python 脚本生成的 JSON 数据：\n(提示：Ctrl+V 粘贴后点击确定)");
+        if (jsonInput !== null) {
+            fillFormWithJSON(jsonInput);
+        }
+    }
+
+    function showInputDialog() {
+        // 创建遮罩层
+        const overlay = document.createElement('div');
+        Object.assign(overlay.style, {
             position: 'fixed',
-            top: '20px',
-            right: '20px',
-            zIndex: '9999',
-            padding: '10px 15px',
-            backgroundColor: '#007bff',
-            color: 'white',
-            border: 'none',
-            borderRadius: '5px',
-            cursor: 'pointer',
-            boxShadow: '0 2px 5px rgba(0,0,0,0.2)',
-            fontSize: '14px',
-            fontWeight: 'bold'
+            top: '0',
+            left: '0',
+            width: '100%',
+            height: '100%',
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            zIndex: '10000',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center'
         });
 
-        // 鼠标悬停效果
-        btn.onmouseover = () => btn.style.backgroundColor = '#0056b3';
-        btn.onmouseout = () => btn.style.backgroundColor = '#007bff';
+        // 创建对话框
+        const dialog = document.createElement('div');
+        Object.assign(dialog.style, {
+            backgroundColor: 'white',
+            padding: '20px',
+            borderRadius: '10px',
+            width: '600px',
+            maxWidth: '90%'
+        });
 
-        // 绑定点击事件
-        btn.onclick = fillForm;
+        dialog.innerHTML = `
+        <h3 style="margin-top:0">请拖拽 JSON 文件或粘贴数据</h3>
+        <div id="drop-zone" style="border:2px dashed #ccc; padding:40px; text-align:center; border-radius:8px; margin-bottom:15px; background:#f9f9f9">
+            📁 拖拽 JSON 文件到这里
+        </div>
+        <textarea id="json-input" style="width:100%; height:30px; padding:8px; font-family:monospace; border:1px solid #ddd; border-radius:5px; box-sizing:border-box" placeholder="或直接粘贴 JSON 数据..."></textarea>
+        <div style="margin-top:15px; text-align:right">
+            <button id="cancel-btn" style="padding:8px 20px; margin-right:8px; cursor:pointer">取消</button>
+            <button id="confirm-btn" style="padding:8px 20px; background:#2980b9; color:white; border:none; border-radius:5px; cursor:pointer">确定</button>
+        </div>
+    `;
+
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+
+        const dropZone = document.getElementById('drop-zone');
+        const textarea = document.getElementById('json-input');
+
+        // 拖拽事件
+        dropZone.ondragover = (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#2980b9';
+            dropZone.style.background = '#e3f2fd';
+        };
+
+        dropZone.ondragleave = () => {
+            dropZone.style.borderColor = '#ccc';
+            dropZone.style.background = '#f9f9f9';
+        };
+
+        dropZone.ondrop = (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#ccc';
+            dropZone.style.background = '#f9f9f9';
+
+            const file = e.dataTransfer.files[0];
+            if (file && file.name.endsWith('.json')) {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    textarea.value = event.target.result;
+                };
+                reader.readAsText(file);
+            } else {
+                alert('请拖拽 JSON 文件');
+            }
+        };
+
+        // 确定按钮
+        document.getElementById('confirm-btn').onclick = () => {
+            const jsonInput = textarea.value;
+            document.body.removeChild(overlay);
+            if (jsonInput.trim()) {
+                fillFormWithJSON(jsonInput);
+            }
+        };
+
+        // 取消按钮
+        document.getElementById('cancel-btn').onclick = () => {
+            document.body.removeChild(overlay);
+        };
+
+        textarea.focus();
+    }
+
+    /**
+     * 初始化 UI 按钮
+     */
+    function initUI() {
+        if (document.getElementById('auto-fill-btn-pro')) return;
+
+        const btn = document.createElement('button');
+        btn.id = 'auto-fill-btn-pro';
+        btn.innerText = '⚡ 粘贴 JSON 自动填表';
+        Object.assign(btn.style, {
+            position: 'fixed',
+            top: '60px',
+            right: '20px',
+            zIndex: '9999',
+            padding: '14px 28px',
+            backgroundColor: '#2980b9',
+            color: 'white',
+            border: 'none',
+            borderRadius: '50px',
+            cursor: 'pointer',
+            boxShadow: '0 6px 20px rgba(41, 128, 185, 0.4)',
+            fontWeight: 'bold',
+            fontSize: '15px',
+            transition: 'all 0.3s'
+        });
+
+        btn.onmouseover = () => btn.style.transform = 'scale(1.05)';
+        btn.onmouseout = () => btn.style.transform = 'scale(1)';
+
+        btn.onclick = (e) => {
+            e.preventDefault();
+            showInputDialog();
+        };
 
         document.body.appendChild(btn);
-        console.log("调试按钮已就绪");
     }
 
-    // 等待页面加载完成后显示按钮
+    // 执行初始化
     if (document.readyState === 'complete') {
-        createDebugButton();
+        initUI();
     } else {
-        window.addEventListener('load', createDebugButton);
+        window.addEventListener('load', initUI);
     }
-
 })();
