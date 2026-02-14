@@ -21,11 +21,12 @@ except ImportError:
 # find . -maxdepth 1 -type d -name "Z-*"
 # find . -maxdepth 1 -type d -name "Z-*" -exec rm -rf {} + 
 
-PRO_VER = "v2.0.0"
+PRO_VER = "v2.1.2"
 
 # 任务字典：{ "视频目录路径": "中文副标题" }
+# 参数 2: 需要做种的完整目录路径 (末尾不要带斜杠)
 TASKS = {
-    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Dallas Mavericks vs Los Angeles Lakers 12 02 1080pEN60fps Prime",
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Milwaukee Bucks vs Oklahoma City Thunder 12 02 1080pEN60fps Prime",
 }
 OUTPUT_BASE_DIR = "/home/pt_main/docker_upload_s/nba/"
 
@@ -35,16 +36,16 @@ OUTPUT_BASE_DIR = "/home/pt_main/docker_upload_s/nba/"
 # ANNOUNCE_URL = "https://rousi.pro/tracker/1d3ba4125577007e0d8c4b1d2527375a/announce"
 ANNOUNCE_URL = " https://t.ubits.club/announce.php"
 
-# 参数 2: 需要做种的完整目录路径 (末尾不要带斜杠)
-# TARGET_DIR = "D:\pt_main\group_of_video\HHQuietSheMightHearU"
 
 # --- 新增功能配置 ---
 # 截图画质 (1-31, 1最好, 31最差, 建议 3-5 保持在 500k 左右)
 SCREENSHOT_QUALITY = 3
 
 # 是否启用 Pixhost 上传功能
-# ENABLE_UPLOAD = False
+#True or False
 ENABLE_UPLOAD = True
+# 是否启用 torrent文件制作功能，此过程非常耗时间
+ENABLE_TORRENT_FILE = True
 # ===========================================
 
 
@@ -159,7 +160,27 @@ def translate_nba_info(raw_string):
 
     except Exception as e:
         return f"Error: {str(e)} during parsing '{raw_string}'"
-# ===========================================
+    
+# ===============================================================================
+def clean_nfo(nfo_text):
+    cleaned_lines = []
+    
+    for line in nfo_text.strip().split('\n'):
+        # 1. 跳过 Unique ID 行
+        if line.strip().startswith("Unique ID"):
+            continue
+            
+        # 2. 处理 Complete name 行，只保留文件名
+        if line.strip().startswith("Complete name"):
+            # 以冒号分割，保留右侧路径，并提取文件名
+            key, path = line.split(":", 1)
+            filename = os.path.basename(path.strip())
+            line = f"{key:<41}: {filename}"
+            
+        cleaned_lines.append(line)
+        
+    return "\n".join(cleaned_lines)
+# ===============================================================================
 
 def write_custom_log(file_path, message, mode='a'):
     """
@@ -614,8 +635,9 @@ def main_prosess(TARGET_DIR):
         try:
             with open(nfo_path, "w") as nfo_f:
                 # mi_res = subprocess.run(["mediainfo", "-f", video_file], stdout=nfo_f)
-                mi_res = subprocess.run(["mediainfo", "-f", video_file], capture_output=True, text=True)
+                mi_res = subprocess.run(["mediainfo", video_file], capture_output=True, text=True)
                 mediainfo_text = mi_res.stdout
+                nfo_f.write(mediainfo_text)
             print(f"成功: NFO 已生成至 {nfo_path}")
         except Exception as e:
             print(f"生成 NFO 失败: {e}")
@@ -651,47 +673,58 @@ def main_prosess(TARGET_DIR):
     total_bytes = get_dir_size(TARGET_DIR)
     piece_l = get_optimal_piece_size(total_bytes)
     
-    # 构建 mktorrent 命令，先输出到 .tmp 文件
-    mk_cmd = [
-        "mktorrent", 
-        "-v", 
-        "-p", 
-        "-l", str(piece_l), 
-        "-a", ANNOUNCE_URL, 
-        "-o", tmp_torrent_path, 
-        TARGET_DIR
-    ]
+    if ENABLE_TORRENT_FILE:
+        # 构建 mktorrent 命令，先输出到 .tmp 文件
+        mk_cmd = [
+            "mktorrent", 
+            "-v", 
+            "-p", 
+            "-l", str(piece_l), 
+            "-a", ANNOUNCE_URL, 
+            "-o", tmp_torrent_path, 
+            TARGET_DIR
+        ]
+        
+        ret = run_command(mk_cmd, log_path)
+        
+        if ret == 0:
+            # 4. 命令成功执行后，将 .tmp 重命名为 .torrent
+            try:
+                if os.path.exists(torrent_path):
+                    os.remove(torrent_path) # 如果已存在旧种子则删除
+                os.rename(tmp_torrent_path, torrent_path)
+                
+                print(f"\n[4/4] 制作完成！")
+                print(f"种子文件: {torrent_path}")
+                print(f"NFO 文件: {nfo_path}")
+                print(f"截图目录: {screens_dir}")
+                print(f"执行日志: {log_path}")
+                print(f"\n提示: 请将 .torrent 和 .nfo 下载到本地上传至 PT 站。")
+            except Exception as e:
+                print(f"\n[!] 重命名临时文件失败: {e}")
+        else:
+            print(f"\n[!] 制作失败，请查看日志: {log_path}")
+            if os.path.exists(tmp_torrent_path):
+                print(f"清理临时文件: {tmp_torrent_path}")
+                os.remove(tmp_torrent_path)
     
-    ret = run_command(mk_cmd, log_path)
+    print(f"\n[4/4] 正在生成最终发布页面json数据...")
     
-    if ret == 0:
-        # 4. 命令成功执行后，将 .tmp 重命名为 .torrent
-        try:
-            if os.path.exists(torrent_path):
-                os.remove(torrent_path) # 如果已存在旧种子则删除
-            os.rename(tmp_torrent_path, torrent_path)
-            
-            print(f"\n[4/4] 制作完成！")
-            print(f"种子文件: {torrent_path}")
-            print(f"NFO 文件: {nfo_path}")
-            print(f"截图目录: {screens_dir}")
-            print(f"执行日志: {log_path}")
-            print(f"\n提示: 请将 .torrent 和 .nfo 下载到本地上传至 PT 站。")
-        except Exception as e:
-            print(f"\n[!] 重命名临时文件失败: {e}")
-    else:
-        print(f"\n[!] 制作失败，请查看日志: {log_path}")
-        if os.path.exists(tmp_torrent_path):
-            print(f"清理临时文件: {tmp_torrent_path}")
-            os.remove(tmp_torrent_path)
-
     bbcode_thanks = f"[quote=castle][color=DarkRed][font=Comic Sans MS][size=6]转自sportscult，感谢原创作者[/size][/font][/color][/quote]\n"
     bbcode_main_pic = f"[url=https://pixhost.to/show/5653/693689299_b13c7363-09da-4c33-bfd6-0cb93c894a2e.png][img]https://img2.pixhost.to/images/5653/693689299_b13c7363-09da-4c33-bfd6-0cb93c894a2e.png[/img][/url]\n\n"
+
+    nba_info1 = f"\n[quote][size=3]NBA（National Basketball Association，国家篮球协会）是北美职业篮球联赛，成立于1946年6月（最初名为BAA），1949年与NBL合并后正式更名为NBA。 它是世界上最高水平的篮球联赛之一，由30支球队组成，其中29支位于美国，1支在加拿大（多伦多猛龙队）。这些球队分为东部联盟和西部联盟，每个联盟各15支球队。 NBA以其高强度的比赛、明星球员和全球影响力闻名，吸引了数亿球迷。\nNBA的赛制分为常规赛和季后赛。常规赛从每年10月开始，到次年4月结束，每支球队打82场比赛（主客场各41场）。比赛分为4节，每节12分钟，总时长48分钟。 常规赛结束后，每个联盟的前8名球队（或通过附加赛决出）进入季后赛。季后赛采用7场4胜制，从首轮到分区决赛，最终东西部冠军在总决赛中争夺总冠军戒指。 此外，还有全明星周末，包括全明星赛、扣篮大赛等娱乐赛事。\nNBA不仅推动篮球运动发展，还通过转播和赞助影响全球体育文化，涌现出如迈克尔·乔丹、勒布朗·詹姆斯等传奇球星。[/size][/quote]\n"
+
+    nba_info2 = f"\n\n[size=3]Title: NBA\nYear: 1954\nIMDb Rating: 8.4/10 from 10126 users\nIMDb Link: https://www.imdb.com/title/tt15164982/\nCreators:\nActors: Michael Jordan / LeBron James / Shaquille O'Neal / Kevin Durant / Scottie Pippen / Stephen Curry / Draymond Green / Klay Thompson / Horace Grant / Chicago Bulls / Los Angeles Lakers / Golden State Warriors / Boston Celtics / New York Knicks / The Minneapolis Lakers / Magic Johnson / Vlade Divac / Sam Perkins[/size]\n\n"
+
+    mediainfo_text = clean_nfo(mediainfo_text)
+
     publish_data = {
         "title": folder_name,
         "subtitle": subtitle,
         "mediainfo": mediainfo_text,
-        "description": bbcode_thanks + f"[color=Navy][font=Trebuchet MS][size=4]" + subtitle + "\n\n" + bbcode_main_pic + "\n".join(bbcode_list),
+        "imdb":"https://www.imdb.com/title/tt15164982",
+        "description": bbcode_thanks + f"[color=Navy][font=Trebuchet MS][size=5]" + subtitle +f"[/size][/font][/color]"+ "\n\n" + bbcode_main_pic + nba_info1 + "\n".join(bbcode_list) + nba_info2,
         "tags": {
             "cat": "407", # NBA/Sports
             "codec": "7",
