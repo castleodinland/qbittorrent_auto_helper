@@ -21,7 +21,7 @@ except ImportError:
 # find . -maxdepth 1 -type d -name "Z-*"
 # find . -maxdepth 1 -type d -name "Z-*" -exec rm -rf {} + 
 
-PRO_VER = "v2.1.2"
+PRO_VER = "v2.2.0"
 
 # 任务字典：{ "视频目录路径": "中文副标题" }
 # 参数 2: 需要做种的完整目录路径 (末尾不要带斜杠)
@@ -160,6 +160,86 @@ def translate_nba_info(raw_string):
 
     except Exception as e:
         return f"Error: {str(e)} during parsing '{raw_string}'"
+    
+def format_nba_filename(raw_string):
+    """
+    将原始 NBA 比赛信息字符串转换为特定的文件名格式。
+    示例输入: NBA RS 2026 Milwaukee Bucks vs Oklahoma City Thunder 12 02 1080pEN60fps Prime
+    示例输出: NBA.RS.Milwaukee.Bucks.vs.Oklahoma.City.Thunder.20260212.WEB-DL.H264.AAC-Prime
+    """
+    try:
+        parts = raw_string.split()
+        if len(parts) < 8:
+            return f"Error: String too short"
+
+        # 1. 提取基本前缀 (NBA RS)
+        prefix_nba = parts[0]
+        prefix_type = parts[1]
+
+        # 2. 提取年份
+        year = parts[2]
+
+        # 3. 定位 "vs" 锚点以区分两支球队
+        vs_idx = -1
+        for i, p in enumerate(parts):
+            if p.lower() == "vs":
+                vs_idx = i
+                break
+        
+        if vs_idx == -1:
+            return "Error: 'vs' not found"
+
+        # 4. 定位画质/技术参数单词 (如 1080p...)
+        # 通常日期在画质单词的前面两个位置
+        quality_idx = -1
+        for i in range(len(parts) - 1, vs_idx, -1):
+            if re.search(r'\d{3,4}p', parts[i].lower()):
+                quality_idx = i
+                break
+        
+        if quality_idx == -1:
+            return "Error: Quality tag (e.g., 1080p) not found"
+
+        # 5. 提取日期信息 (月份和日期)
+        # 根据原始逻辑：月份是 quality_idx - 1，日期是 quality_idx - 2
+        # 注意：输出需要 YYYYMMDD 格式，需补零
+        month_raw = parts[quality_idx - 1]
+        day_raw = parts[quality_idx - 2]
+        
+        # 补零处理 (02 -> 02, 2 -> 02)
+        month = month_raw.zfill(2)
+        day = day_raw.zfill(2)
+        date_str = f"{year}{month}{day}"
+
+        # 6. 提取球队名称
+        team_a_parts = parts[3:vs_idx]
+        team_b_parts = parts[vs_idx + 1 : quality_idx - 2]
+        
+        # 7. 提取最后的发布组名称 (Prime)
+        # 假设 quality_idx 之后的部分是发布组名
+        release_group = "Unknown"
+        if len(parts) > quality_idx + 1:
+            release_group = parts[quality_idx + 1]
+
+        # 8. 拼接结果
+        # 结构: NBA.RS.TeamA.vs.TeamB.YYYYMMDD.WEB-DL.H264.AAC-Group
+        main_content = [
+            prefix_nba, 
+            prefix_type, 
+            *team_a_parts, 
+            "vs", 
+            *team_b_parts, 
+            date_str,
+            "WEB-DL",
+            "H264",
+            "AAC"
+        ]
+        
+        result = ".".join(main_content) + f"-{release_group}"
+        return result
+
+    except Exception as e:
+        return raw_string
     
 # ===============================================================================
 def clean_nfo(nfo_text):
@@ -604,15 +684,19 @@ def main_prosess(TARGET_DIR):
     print(f"folder_name: {folder_name}")
     # return None
     
+    main_title = format_nba_filename(folder_name)
+
     # 最终路径
-    torrent_path = os.path.join(parent_dir, f"{folder_name}.torrent")
+    torrent_path = os.path.join(parent_dir, f"{main_title}.torrent")
     # 临时路径
-    tmp_torrent_path = os.path.join(parent_dir, f"{folder_name}.torrent.tmp")
+    tmp_torrent_path = os.path.join(parent_dir, f"{main_title}.torrent.tmp")
     
-    nfo_path = os.path.join(parent_dir, f"{folder_name}.nfo")
+    nfo_path = os.path.join(parent_dir, f"{main_title}.nfo")
     log_path = os.path.join(parent_dir, "mktorrent_execution.log")
     url_log_path = os.path.join(parent_dir, "screenshots_urls.log")
     publish_path = os.path.join(parent_dir, "publish.json")
+
+    
     
     # 修改点：固定存放在 parent_dir 下的 screenshots 文件夹
     screens_dir = os.path.join(parent_dir, "screenshots")
@@ -711,7 +795,12 @@ def main_prosess(TARGET_DIR):
     print(f"\n[4/4] 正在生成最终发布页面json数据...")
     
     bbcode_thanks = f"[quote=castle][color=DarkRed][font=Comic Sans MS][size=6]转自sportscult，感谢原创作者[/size][/font][/color][/quote]\n"
-    bbcode_main_pic = f"[url=https://pixhost.to/show/5653/693689299_b13c7363-09da-4c33-bfd6-0cb93c894a2e.png][img]https://img2.pixhost.to/images/5653/693689299_b13c7363-09da-4c33-bfd6-0cb93c894a2e.png[/img][/url]\n\n"
+
+    # bbcode_main_pic = f"[url=https://pixhost.to/show/5653/693689299_b13c7363-09da-4c33-bfd6-0cb93c894a2e.png][img]https://img2.pixhost.to/images/5653/693689299_b13c7363-09da-4c33-bfd6-0cb93c894a2e.png[/img][/url]\n\n"
+
+    bbcode_main_pic = f"[url=https://pixhost.to/show/5748/695168660_main.jpg][img]https://img2.pixhost.to/images/5748/695168660_main.jpg[/img][/url]\n\n"
+
+
 
     nba_info1 = f"\n[quote][size=3]NBA（National Basketball Association，国家篮球协会）是北美职业篮球联赛，成立于1946年6月（最初名为BAA），1949年与NBL合并后正式更名为NBA。 它是世界上最高水平的篮球联赛之一，由30支球队组成，其中29支位于美国，1支在加拿大（多伦多猛龙队）。这些球队分为东部联盟和西部联盟，每个联盟各15支球队。 NBA以其高强度的比赛、明星球员和全球影响力闻名，吸引了数亿球迷。\nNBA的赛制分为常规赛和季后赛。常规赛从每年10月开始，到次年4月结束，每支球队打82场比赛（主客场各41场）。比赛分为4节，每节12分钟，总时长48分钟。 常规赛结束后，每个联盟的前8名球队（或通过附加赛决出）进入季后赛。季后赛采用7场4胜制，从首轮到分区决赛，最终东西部冠军在总决赛中争夺总冠军戒指。 此外，还有全明星周末，包括全明星赛、扣篮大赛等娱乐赛事。\nNBA不仅推动篮球运动发展，还通过转播和赞助影响全球体育文化，涌现出如迈克尔·乔丹、勒布朗·詹姆斯等传奇球星。[/size][/quote]\n"
 
@@ -720,7 +809,7 @@ def main_prosess(TARGET_DIR):
     mediainfo_text = clean_nfo(mediainfo_text)
 
     publish_data = {
-        "title": folder_name,
+        "title": main_title,
         "subtitle": subtitle,
         "mediainfo": mediainfo_text,
         "imdb":"https://www.imdb.com/title/tt15164982",
