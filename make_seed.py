@@ -21,12 +21,17 @@ except ImportError:
 # find . -maxdepth 1 -type d -name "Z-*"
 # find . -maxdepth 1 -type d -name "Z-*" -exec rm -rf {} + 
 
-PRO_VER = "v2.2.0"
+PRO_VER = "v2.3.0"
 
 # 任务字典：{ "视频目录路径": "中文副标题" }
 # 参数 2: 需要做种的完整目录路径 (末尾不要带斜杠)
 TASKS = {
-    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Milwaukee Bucks vs Oklahoma City Thunder 12 02 1080pEN60fps Prime",
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Philadelphia 76ers vs Indiana Pacers 24 02 720pEN60fps FDSN",
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 New York Knicks vs Cleveland Cavaliers 24 02 720pEN60fps Peacock",
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Orlando Magic vs Los Angeles Lakers 24 02 720pEN60fps SpectrumSN",
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Phoenix Suns vs Boston Celtics 24 02 720pEN60fps NBCSB",
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Minnesota Timberwolves vs Portland Trail Blazers 24 02 720pEN60fps Peacock",
+    "/home/pt_main/docker_upload_s/nba/NBA RS 2026 Golden State Warriors vs New Orleans Pelicans 24 02 720pEN60fps GulfCoast",
 }
 OUTPUT_BASE_DIR = "/home/pt_main/docker_upload_s/nba/"
 
@@ -163,9 +168,10 @@ def translate_nba_info(raw_string):
     
 def format_nba_filename(raw_string):
     """
-    将原始 NBA 比赛信息字符串转换为特定的文件名格式。
+    将原始 NBA 比赛信息字符串转换为包含画质和帧率的特定文件名格式。
+    
     示例输入: NBA RS 2026 Milwaukee Bucks vs Oklahoma City Thunder 12 02 1080pEN60fps Prime
-    示例输出: NBA.RS.Milwaukee.Bucks.vs.Oklahoma.City.Thunder.20260212.WEB-DL.H264.AAC-Prime
+    示例输出: NBA.RS.Milwaukee.Bucks.vs.Oklahoma.City.Thunder.20260212.1080p.WEB-DL.H264.60fps.AAC-Prime
     """
     try:
         parts = raw_string.split()
@@ -179,7 +185,7 @@ def format_nba_filename(raw_string):
         # 2. 提取年份
         year = parts[2]
 
-        # 3. 定位 "vs" 锚点以区分两支球队
+        # 3. 定位 "vs" 锚点
         vs_idx = -1
         for i, p in enumerate(parts):
             if p.lower() == "vs":
@@ -189,40 +195,46 @@ def format_nba_filename(raw_string):
         if vs_idx == -1:
             return "Error: 'vs' not found"
 
-        # 4. 定位画质/技术参数单词 (如 1080p...)
-        # 通常日期在画质单词的前面两个位置
-        quality_idx = -1
+        # 4. 定位技术参数单词 (包含画质信息的词，如 1080pEN60fps)
+        tech_idx = -1
+        quality_val = "1080p" # 默认值
+        fps_val = "60fps"     # 默认值
+
         for i in range(len(parts) - 1, vs_idx, -1):
-            if re.search(r'\d{3,4}p', parts[i].lower()):
-                quality_idx = i
+            match_q = re.search(r'(\d{3,4}p)', parts[i].lower())
+            if match_q:
+                tech_idx = i
+                quality_val = match_q.group(1)
+                
+                # 在同一个词或后续词中查找 fps
+                match_f = re.search(r'(\d{2,3}fps)', parts[i].lower())
+                if match_f:
+                    fps_val = match_f.group(1)
                 break
         
-        if quality_idx == -1:
+        if tech_idx == -1:
             return "Error: Quality tag (e.g., 1080p) not found"
 
-        # 5. 提取日期信息 (月份和日期)
-        # 根据原始逻辑：月份是 quality_idx - 1，日期是 quality_idx - 2
-        # 注意：输出需要 YYYYMMDD 格式，需补零
-        month_raw = parts[quality_idx - 1]
-        day_raw = parts[quality_idx - 2]
+        # 5. 提取日期信息 (基于 tech_idx 往前推)
+        # 假设格式固定为: ... Day Month TechTag ...
+        month_raw = parts[tech_idx - 1]
+        day_raw = parts[tech_idx - 2]
         
-        # 补零处理 (02 -> 02, 2 -> 02)
         month = month_raw.zfill(2)
         day = day_raw.zfill(2)
         date_str = f"{year}{month}{day}"
 
         # 6. 提取球队名称
         team_a_parts = parts[3:vs_idx]
-        team_b_parts = parts[vs_idx + 1 : quality_idx - 2]
+        team_b_parts = parts[vs_idx + 1 : tech_idx - 2]
         
-        # 7. 提取最后的发布组名称 (Prime)
-        # 假设 quality_idx 之后的部分是发布组名
+        # 7. 提取发布组名称
         release_group = "Unknown"
-        if len(parts) > quality_idx + 1:
-            release_group = parts[quality_idx + 1]
+        if len(parts) > tech_idx + 1:
+            release_group = parts[tech_idx + 1]
 
         # 8. 拼接结果
-        # 结构: NBA.RS.TeamA.vs.TeamB.YYYYMMDD.WEB-DL.H264.AAC-Group
+        # 目标结构: NBA.RS.TeamA.vs.TeamB.YYYYMMDD.Quality.WEB-DL.H264.FPS.AAC-Group
         main_content = [
             prefix_nba, 
             prefix_type, 
@@ -230,8 +242,10 @@ def format_nba_filename(raw_string):
             "vs", 
             *team_b_parts, 
             date_str,
+            quality_val,    # 插入画质
             "WEB-DL",
             "H264",
+            fps_val,        # 插入帧率
             "AAC"
         ]
         
@@ -239,7 +253,7 @@ def format_nba_filename(raw_string):
         return result
 
     except Exception as e:
-        return raw_string
+        return f"Error processing: {str(e)}"
     
 # ===============================================================================
 def clean_nfo(nfo_text):
