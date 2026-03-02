@@ -130,7 +130,7 @@
             // 音频编码解析
             let audioValue = "";
             if (nfo.match(/Format\s*:\s*AAC/i)) audioValue = "6";
-            else if (nfo.match(/Format\s*:\s*AC-3/i) || nfo.match(/Commercial name\s*:\s*Dolby Digital/i)) audioValue = "26";
+            else if (nfo.match(/Format\s*:\s*AC-3/i) || nfo.match(/Commercial name\s*:\s*Dolby Digital/i)) audioValue = "18";
             else if (nfo.match(/Format\s*:\s*DTS/i)) {
                 if (nfo.match(/DTS-HD/i)) audioValue = "19";
                 else audioValue = "25";
